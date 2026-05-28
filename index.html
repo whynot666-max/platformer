@@ -740,7 +740,9 @@ function update() {
   if (player.x < 0) { player.x = 0; player.vx = 0; }
   if (player.x + player.w > W) { player.x = W - player.w; player.vx = 0; }
   if (player.y > H + 200) {
-    respawn();
+    // Falling off = death. Mark hearts to 0 so the deferred death check at the
+    // end of update() handles the actual world-reset cleanly.
+    player.hearts = 0;
   }
 
   updateBots();
@@ -757,9 +759,9 @@ function update() {
     advanceQueued = false;
   }
 
-  // Deferred respawn: handle death at the end of the tick so nothing mutates
-  // state (clears projectiles, resets boss) while another loop is iterating.
-  if (player.hearts <= 0) respawn();
+  // Deferred death: handle at the end of the tick so nothing mutates state
+  // (clears projectiles, switches level) while another loop is iterating.
+  if (player.hearts <= 0) die();
 }
 
 function updateBots() {
@@ -826,7 +828,7 @@ function respawn() {
   player.invulnTimer = 0;
   player.facing = 1;
 
-  // Reset boss + clear projectiles so dying doesn't let you cheese the fight
+  // Reset boss + clear projectiles
   projectiles = [];
   if (boss) {
     const lvDef = LEVELS[currentLevel];
@@ -837,6 +839,12 @@ function respawn() {
       boss.projTimer = 0;
     }
   }
+}
+
+// Death sends you back to the FIRST level of the current world (worlds are 3 levels each)
+function die() {
+  const worldFirst = Math.floor(currentLevel / 3) * 3;
+  loadLevel(worldFirst);
 }
 
 function getSolids() {
