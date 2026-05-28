@@ -1,0 +1,1734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Platformer</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #1a1a2e;
+    color: #eee;
+    font-family: -apple-system, sans-serif;
+    overflow: hidden;
+    height: 100%;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+  }
+  #info {
+    margin-bottom: 12px;
+    font-size: 14px;
+    opacity: 0.85;
+    text-align: center;
+    padding: 0 12px;
+  }
+  #game-wrap {
+    position: relative;
+    max-width: 100vw;
+    max-height: 100vh;
+  }
+  canvas {
+    display: block;
+    background: #87ceeb;
+    border: 3px solid #333;
+    border-radius: 6px;
+    image-rendering: pixelated;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    width: min(calc(100vw - 24px), calc((100vh - 80px) * 1.6));
+    height: auto;
+    aspect-ratio: 800 / 500;
+  }
+
+  /* Touch controls — hidden by default, shown on touch devices */
+  .touch-pad {
+    position: absolute;
+    bottom: 4%;
+    display: none;
+    gap: 12px;
+    z-index: 10;
+    pointer-events: auto;
+  }
+  .touch-pad-left  { left: 3%;  }
+  .touch-pad-right { right: 3%; }
+  .touch-btn {
+    width: clamp(48px, 9vmin, 80px);
+    height: clamp(48px, 9vmin, 80px);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.18);
+    border: 3px solid rgba(255, 255, 255, 0.55);
+    color: white;
+    font-size: clamp(11px, 1.8vmin, 16px);
+    font-weight: 800;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+    padding: 0;
+  }
+  .touch-btn.dash { background: rgba(126, 203, 255, 0.35); border-color: rgba(126, 203, 255, 0.8); }
+  .touch-btn.jump { background: rgba(255, 204, 68, 0.35);  border-color: rgba(255, 204, 68, 0.8); }
+  .touch-btn:active { transform: scale(0.92); filter: brightness(1.4); }
+
+  @media (hover: none) and (pointer: coarse) {
+    #info { display: none; }
+    .touch-pad { display: flex; }
+    body { padding: 0; }
+    canvas { width: 100vw; max-height: 100vh; }
+  }
+</style>
+</head>
+<body>
+<div id="info">walk: <b>A / D</b> or <b>← →</b> &nbsp;·&nbsp; jump: <b>W</b>, <b>Space</b>, or <b>↑</b> &nbsp;·&nbsp; dash: <b>J</b> or <b>Shift</b> &nbsp;·&nbsp; restart: <b>R</b> &nbsp;·&nbsp; level: <b>1–9</b>, <b>0</b>=10, <b>[</b>/<b>]</b>=prev/next</div>
+<div id="game-wrap">
+  <canvas id="game" width="800" height="500"></canvas>
+  <div class="touch-pad touch-pad-left">
+    <button class="touch-btn" id="btn-left">◀</button>
+    <button class="touch-btn" id="btn-right">▶</button>
+  </div>
+  <div class="touch-pad touch-pad-right">
+    <button class="touch-btn dash" id="btn-dash">DASH</button>
+    <button class="touch-btn jump" id="btn-jump">JUMP</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+const GRAVITY = 0.6;
+const FRICTION = 0.82;
+const MOVE_ACCEL = 0.8;
+const MAX_SPEED = 5;
+const JUMP_POWER = 12.5;
+const DASH_SPEED = 15;
+const DASH_DURATION = 12;   // frames the dash lasts (~1/5 second). distance = SPEED * DURATION
+const DASH_COOLDOWN = 20;   // frames before you can dash again (~1/3 second)
+const SUPER_BOOST_FRAMES = 14; // after a dash-cancelled super-jump, frames you keep extra horizontal speed
+
+const MAX_HEARTS = 3;
+const INVULN_FRAMES = 36;       // was 60 — shorter so damage-boosting is riskier
+const HURT_KNOCKBACK_X = 6;
+const HURT_KNOCKBACK_Y = -8;
+const STUN_DURATION = 240;  // frames a bot stays frozen (~4 seconds)
+
+const player = {
+  x: 80,
+  y: 100,
+  w: 28,
+  h: 40,
+  vx: 0,
+  vy: 0,
+  onGround: false,
+  facing: 1,
+  dashTimer: 0,
+  dashCooldown: 0,
+  dashDir: 1,
+  superBoost: 0,
+  hearts: MAX_HEARTS,
+  invulnTimer: 0,
+};
+
+// Current-level state (filled by loadLevel)
+let platforms = [];
+let bots = [];
+let projectiles = [];
+let boss = null;
+let goal = null;
+let spawn = { x: 80, y: 100 };
+let babaRule = null;
+let currentTheme = 'field';
+
+// Boss state machine timings (frames)
+const BOSS_VULN_FRAMES   = 180;  // 3.0s vulnerable
+const BOSS_STUN_FRAMES   = 120;  // 2.0s stunned after a dash hit
+const BOSS_TELE_FRAMES   = 50;   // 0.83s telegraph (was 60)
+const BOSS_ATK_FRAMES    = 120;  // 2.0s attacking (was 90)
+const BOSS_PROJ_INTERVAL = 20;   // shoot a projectile every 0.33s (was 30) — denser barrage
+const BOSS_PROJ_SPEED    = 7;
+let levelName = '';
+let currentLevel = 0;
+let levelComplete = false;
+let levelCompleteTimer = 0;
+
+// ─────────── helpers for compact level config ───────────
+const sprout = (x, y, pMin, pMax, speed = 1.3) => ({
+  type: 'sprout', x, y, w: 30, h: 26,
+  vx: speed, speed,
+  patrolMin: pMin, patrolMax: pMax, stunTimer: 0,
+});
+const floater = (x, y, pMin, pMax, speed = 1.4) => ({
+  type: 'floater', x, y, w: 32, h: 28,
+  vx: speed, speed,
+  patrolMin: pMin, patrolMax: pMax, stunTimer: 0,
+});
+const flag = (x = 750) => ({ x, y: H - 40 - 60, w: 24, h: 60 });
+const floor = (x = 0, w = W) => ({ x, y: H - 40, w, h: 40 });
+const bossArena = (theme, name, hp, isFinal = false) => ({
+  name, theme,
+  spawn: { x: 50, y: 380 },
+  platforms: [
+    floor(),
+    { x: 80,  y: 320, w: 120, h: 18 },
+    { x: 600, y: 320, w: 120, h: 18 },
+  ],
+  bots: [],
+  boss: {
+    x: isFinal ? W / 2 - 50 : W / 2 - 40,
+    y: isFinal ? H - 40 - 120 : H - 40 - 90,
+    w: isFinal ? 100 : 80,
+    h: isFinal ? 120 : 90,
+    hp,
+    isFinal,
+  },
+});
+
+// ─────────── 30 levels, 10 worlds × 3 ───────────
+const LEVELS = [
+  // ─── WORLD 1: FIELD ───
+  {
+    name: 'Field 1',
+    theme: 'field',
+    spawn: { x: 60, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 350, h: 40 },
+      { x: 420, y: H - 40, w: 380, h: 40 },
+      { x: 200, y: 400, w: 80,  h: 18 },
+      { x: 320, y: 320, w: 100, h: 18 },
+      { x: 500, y: 360, w: 100, h: 18 },
+    ],
+    bots: [ sprout(480, H - 40 - 26, 440, 690) ],
+    goal: flag(740),
+    babaRule: { x: 310, y: 70 },
+  },
+  {
+    name: 'Field 2',
+    theme: 'field',
+    spawn: { x: 60, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 200, h: 40 },
+      { x: 380, y: 400, w: 90, h: 18 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [ sprout(400, 400 - 26, 380, 470) ],
+    goal: flag(750),
+  },
+  bossArena('field', 'Field Boss', 3),
+
+  // ─── WORLD 2: FACTORY ───
+  {
+    name: 'Factory 1',
+    theme: 'factory',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 200, h: 40 },
+      { x: 620, y: H - 40, w: 180, h: 40 },
+    ],
+    bots: [ floater(380, 310, 340, 460) ],
+    goal: flag(720),
+  },
+  {
+    name: 'Factory 2',
+    theme: 'factory',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 160, h: 40 },
+      { x: 260, y: 410, w: 100, h: 18 },
+      { x: 540, y: 380, w: 100, h: 18 },
+      { x: 720, y: H - 40, w: 80,  h: 40 },
+    ],
+    bots: [
+      sprout(280, 410 - 26, 260, 360),
+      floater(420, 320, 380, 510, 1.5),
+      sprout(560, 380 - 26, 540, 630),
+    ],
+    goal: flag(750),
+  },
+  bossArena('factory', 'Factory Boss', 4),
+
+  // ─── WORLD 3: CAVE ───
+  {
+    name: 'Cave 1',
+    theme: 'cave',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      floor(),
+      { x: 200, y: 380, w: 100, h: 18 },
+      { x: 400, y: 320, w: 100, h: 18 },
+      { x: 600, y: 260, w: 100, h: 18 },
+    ],
+    bots: [ sprout(420, 320 - 26, 400, 490) ],
+    goal: flag(720),
+  },
+  {
+    name: 'Cave 2',
+    theme: 'cave',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 200, h: 40 },
+      { x: 280, y: 380, w: 100, h: 18 },
+      { x: 470, y: 320, w: 100, h: 18 },
+      { x: 660, y: H - 40, w: 140, h: 40 },
+    ],
+    bots: [
+      sprout(300, 380 - 26, 280, 370),
+      sprout(490, 320 - 26, 470, 560),
+    ],
+    goal: flag(740),
+  },
+  bossArena('cave', 'Cave Boss', 4),
+
+  // ─── WORLD 4: SKY ───
+  {
+    name: 'Sky 1',
+    theme: 'sky',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 180, h: 40 },
+      { x: 640, y: H - 40, w: 160, h: 40 },
+    ],
+    bots: [ floater(380, 290, 320, 460, 1.4) ],
+    goal: flag(720),
+  },
+  {
+    name: 'Sky 2',
+    theme: 'sky',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 160, h: 40 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [
+      floater(280, 290, 240, 360),
+      floater(500, 290, 460, 580, 1.6),
+    ],
+    goal: flag(740),
+  },
+  bossArena('sky', 'Sky Boss', 4),
+
+  // ─── WORLD 5: VOLCANO ───
+  {
+    name: 'Volcano 1',
+    theme: 'volcano',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 200, h: 40 },
+      { x: 280, y: 400, w: 80,  h: 18 },
+      { x: 440, y: 360, w: 80,  h: 18 },
+      { x: 600, y: H - 40, w: 200, h: 40 },
+    ],
+    bots: [
+      sprout(290, 400 - 26, 280, 360),
+      floater(470, 290, 440, 520),
+    ],
+    goal: flag(740),
+  },
+  {
+    name: 'Volcano 2',
+    theme: 'volcano',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 140, h: 40 },
+      { x: 240, y: 400, w: 80,  h: 18 },
+      { x: 400, y: 340, w: 80,  h: 18 },
+      { x: 560, y: 400, w: 80,  h: 18 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [
+      sprout(250, 400 - 26, 240, 320),
+      floater(420, 270, 400, 480, 1.6),
+      sprout(570, 400 - 26, 560, 640),
+    ],
+    goal: flag(750),
+  },
+  bossArena('volcano', 'Volcano Boss', 5),
+
+  // ─── WORLD 6: ICE ───
+  {
+    name: 'Ice 1',
+    theme: 'ice',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      floor(),
+      { x: 160, y: 400, w: 80, h: 18 },
+      { x: 320, y: 360, w: 80, h: 18 },
+      { x: 480, y: 320, w: 80, h: 18 },
+      { x: 640, y: 280, w: 80, h: 18 },
+    ],
+    bots: [
+      sprout(180, 400 - 26, 160, 240),
+      floater(420, 260, 400, 540, 1.5),
+    ],
+    goal: { x: 690, y: 280 - 60, w: 24, h: 60 },
+  },
+  {
+    name: 'Ice 2',
+    theme: 'ice',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 140, h: 40 },
+      { x: 220, y: 410, w: 80,  h: 18 },
+      { x: 380, y: 360, w: 80,  h: 18 },
+      { x: 540, y: 310, w: 80,  h: 18 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [
+      sprout(240, 410 - 26, 220, 300),
+      floater(440, 260, 380, 540, 1.7),
+      sprout(560, 310 - 26, 540, 620),
+    ],
+    goal: flag(750),
+  },
+  bossArena('ice', 'Ice Boss', 5),
+
+  // ─── WORLD 7: DESERT ───
+  {
+    name: 'Desert 1',
+    theme: 'desert',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      floor(),
+      { x: 220, y: 380, w: 90, h: 18 },
+      { x: 420, y: 340, w: 90, h: 18 },
+      { x: 620, y: 300, w: 90, h: 18 },
+    ],
+    bots: [
+      sprout(240, 380 - 26, 220, 310),
+      sprout(440, 340 - 26, 420, 510),
+      sprout(640, 300 - 26, 620, 710),
+    ],
+    goal: flag(720),
+  },
+  {
+    name: 'Desert 2',
+    theme: 'desert',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 160, h: 40 },
+      { x: 240, y: 390, w: 70, h: 18 },
+      { x: 440, y: 390, w: 70, h: 18 },
+      { x: 640, y: H - 40, w: 160, h: 40 },
+    ],
+    bots: [
+      floater(300, 290, 240, 460, 1.6),
+      floater(520, 290, 460, 620, 1.8),
+    ],
+    goal: flag(740),
+  },
+  bossArena('desert', 'Desert Boss', 5),
+
+  // ─── WORLD 8: FOREST ───
+  {
+    name: 'Forest 1',
+    theme: 'forest',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 180, h: 40 },
+      { x: 260, y: 400, w: 80,  h: 18 },
+      { x: 400, y: 340, w: 80,  h: 18 },
+      { x: 540, y: 400, w: 80,  h: 18 },
+      { x: 680, y: H - 40, w: 120, h: 40 },
+    ],
+    bots: [
+      sprout(280, 400 - 26, 260, 340),
+      floater(440, 270, 400, 520, 1.7),
+      sprout(560, 400 - 26, 540, 620),
+    ],
+    goal: flag(740),
+  },
+  {
+    name: 'Forest 2',
+    theme: 'forest',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 140, h: 40 },
+      { x: 200, y: 380, w: 70, h: 18 },
+      { x: 320, y: 320, w: 70, h: 18 },
+      { x: 440, y: 380, w: 70, h: 18 },
+      { x: 560, y: 320, w: 70, h: 18 },
+      { x: 680, y: H - 40, w: 120, h: 40 },
+    ],
+    bots: [
+      sprout(330, 320 - 26, 320, 390),
+      sprout(450, 380 - 26, 440, 510),
+      floater(580, 250, 560, 660, 2.0),
+    ],
+    goal: flag(740),
+  },
+  bossArena('forest', 'Forest Boss', 6),
+
+  // ─── WORLD 9: OCEAN ───
+  {
+    name: 'Ocean 1',
+    theme: 'ocean',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 140, h: 40 },
+      { x: 680, y: H - 40, w: 120, h: 40 },
+    ],
+    bots: [
+      floater(260, 300, 220, 360, 1.7),
+      floater(460, 250, 420, 560, 1.9),
+      floater(620, 320, 580, 660, 1.6),
+    ],
+    goal: flag(740),
+  },
+  {
+    name: 'Ocean 2',
+    theme: 'ocean',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 120, h: 40 },
+      { x: 230, y: 390, w: 60, h: 18 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [
+      sprout(245, 390 - 26, 230, 290),
+      floater(360, 320, 320, 420, 1.8),
+      floater(500, 260, 460, 580, 2.0),
+      floater(620, 320, 580, 680, 1.8),
+    ],
+    goal: flag(740),
+  },
+  bossArena('ocean', 'Ocean Boss', 6),
+
+  // ─── WORLD 10: COSMIC ───
+  {
+    name: 'Cosmic 1',
+    theme: 'cosmic',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 140, h: 40 },
+      { x: 220, y: 400, w: 70, h: 18 },
+      { x: 360, y: 350, w: 70, h: 18 },
+      { x: 500, y: 300, w: 70, h: 18 },
+      { x: 640, y: H - 40, w: 160, h: 40 },
+    ],
+    bots: [
+      sprout(240, 400 - 26, 220, 290),
+      floater(400, 270, 360, 460, 1.9),
+      floater(560, 220, 500, 600, 2.1),
+    ],
+    goal: flag(730),
+  },
+  {
+    name: 'Cosmic 2',
+    theme: 'cosmic',
+    spawn: { x: 50, y: 380 },
+    platforms: [
+      { x: 0,   y: H - 40, w: 120, h: 40 },
+      { x: 200, y: 380, w: 60, h: 18 },
+      { x: 340, y: 320, w: 60, h: 18 },
+      { x: 480, y: 380, w: 60, h: 18 },
+      { x: 620, y: 320, w: 60, h: 18 },
+      { x: 700, y: H - 40, w: 100, h: 40 },
+    ],
+    bots: [
+      sprout(355, 320 - 26, 340, 400),
+      sprout(495, 380 - 26, 480, 540),
+      floater(580, 250, 540, 640, 2.0),
+      floater(420, 250, 380, 480, 2.2),
+    ],
+    goal: flag(740),
+  },
+  bossArena('cosmic', 'FINAL BOSS', 8, true),
+];
+
+const keys = {};
+let jumpQueued = false;
+let dashQueued = false;
+let advanceQueued = false;
+
+window.addEventListener('keydown', (e) => {
+  const k = e.key.toLowerCase();
+  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'enter'].includes(k)) {
+    e.preventDefault();
+  }
+  if (!keys[k]) {
+    if (k === 'w' || k === ' ' || k === 'arrowup') jumpQueued = true;
+    if (k === 'j' || k === 'shift') dashQueued = true;
+    if (k === ' ' || k === 'enter') advanceQueued = true;
+    if (k === 'r') {
+      loadLevel(currentLevel);
+    }
+    // Dev: 1-9 jumps to that level, 0 jumps to level 10
+    if (k >= '1' && k <= '9') {
+      const idx = parseInt(k, 10) - 1;
+      if (idx < LEVELS.length) loadLevel(idx);
+    }
+    if (k === '0') {
+      if (9 < LEVELS.length) loadLevel(9);
+    }
+    // Dev: [ and ] step through any level (works past level 10)
+    if (k === ']' || k === '=') {
+      loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
+    }
+    if (k === '[' || k === '-') {
+      loadLevel(Math.max(0, currentLevel - 1));
+    }
+  }
+  keys[k] = true;
+});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+// Touch / mouse controls for mobile
+function bindTouchButton(id, onPress, onRelease) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const press = (e) => { e.preventDefault(); onPress(); };
+  const release = (e) => { e.preventDefault(); onRelease(); };
+  el.addEventListener('touchstart', press,   { passive: false });
+  el.addEventListener('touchend',   release, { passive: false });
+  el.addEventListener('touchcancel',release, { passive: false });
+  el.addEventListener('mousedown',  press);
+  el.addEventListener('mouseup',    release);
+  el.addEventListener('mouseleave', release);
+}
+
+bindTouchButton('btn-left',
+  () => { keys['a'] = true; },
+  () => { keys['a'] = false; });
+bindTouchButton('btn-right',
+  () => { keys['d'] = true; },
+  () => { keys['d'] = false; });
+bindTouchButton('btn-jump',
+  () => { jumpQueued = true; advanceQueued = true; keys['w'] = true; },
+  () => { keys['w'] = false; });
+bindTouchButton('btn-dash',
+  () => { dashQueued = true; keys['j'] = true; },
+  () => { keys['j'] = false; });
+
+const SAVE_KEY = 'platformer.currentLevel';
+
+function saveProgress() {
+  try { localStorage.setItem(SAVE_KEY, String(currentLevel)); } catch (e) {}
+}
+
+function loadSavedLevel() {
+  try {
+    const v = localStorage.getItem(SAVE_KEY);
+    const n = parseInt(v, 10);
+    if (!isNaN(n) && n >= 0 && n < LEVELS.length) return n;
+  } catch (e) {}
+  return 0;
+}
+
+function loadLevel(idx) {
+  const lv = LEVELS[idx];
+  currentLevel = idx;
+  levelName = lv.name;
+  saveProgress();
+  spawn = { x: lv.spawn.x, y: lv.spawn.y };
+  // Deep-copy platforms and bots so we don't mutate the level definition
+  platforms = lv.platforms.map((p) => ({ ...p }));
+  bots = lv.bots.map((b) => ({ ...b, stunTimer: 0 }));
+  goal = lv.goal ? { ...lv.goal } : null;
+  // Every level shows FLAG IS WIN by default; levels can override the position.
+  babaRule = lv.babaRule ? { ...lv.babaRule } : { x: 310, y: 70 };
+  currentTheme = lv.theme || 'field';
+  projectiles = [];
+  boss = lv.boss ? {
+    ...lv.boss,
+    maxHp: lv.boss.hp,
+    state: 'vulnerable',
+    stateTimer: BOSS_VULN_FRAMES,
+    projTimer: 0,
+  } : null;
+  levelComplete = false;
+  levelCompleteTimer = 0;
+  respawn();
+}
+
+function pressing(...names) {
+  return names.some((n) => keys[n]);
+}
+
+function update() {
+  if (levelComplete) {
+    levelCompleteTimer++;
+    if (advanceQueued && levelCompleteTimer > 30) {
+      advanceQueued = false;
+      const next = currentLevel + 1;
+      if (next < LEVELS.length) {
+        loadLevel(next);
+      } else {
+        // last level — restart from beginning for now
+        loadLevel(0);
+      }
+    }
+    advanceQueued = false;
+    jumpQueued = false;
+    dashQueued = false;
+    return;
+  }
+
+  const left  = pressing('a', 'arrowleft');
+  const right = pressing('d', 'arrowright');
+
+  const dashing = player.dashTimer > 0;
+
+  if (!dashing) {
+    if (left)  { player.vx -= MOVE_ACCEL; player.facing = -1; }
+    if (right) { player.vx += MOVE_ACCEL; player.facing =  1; }
+
+    player.vx *= FRICTION;
+    if (Math.abs(player.vx) < 0.05) player.vx = 0;
+    // Speed cap is relaxed while super-boost is active, so you keep your dash speed for a beat
+    if (player.superBoost <= 0) {
+      player.vx = Math.max(-MAX_SPEED, Math.min(MAX_SPEED, player.vx));
+    } else {
+      player.vx = Math.max(-DASH_SPEED, Math.min(DASH_SPEED, player.vx));
+    }
+  }
+
+  if (jumpQueued) {
+    if (dashing) {
+      // SUPER-JUMP: cancel the dash, jump up, keep dash-speed horizontal momentum for a window
+      player.dashTimer = 0;
+      player.vy = -JUMP_POWER;
+      player.vx = DASH_SPEED * player.dashDir;
+      player.superBoost = SUPER_BOOST_FRAMES;
+      player.onGround = false;
+    } else if (player.onGround) {
+      player.vy = -JUMP_POWER;
+      player.onGround = false;
+    }
+  }
+  jumpQueued = false;
+
+  if (player.superBoost > 0) player.superBoost--;
+
+  if (dashQueued && player.dashCooldown <= 0) {
+    player.dashTimer = DASH_DURATION;
+    player.dashCooldown = DASH_COOLDOWN;
+    player.dashDir = player.facing;
+    player.vy = 0;
+  }
+  dashQueued = false;
+
+  if (player.dashTimer > 0) {
+    player.vx = DASH_SPEED * player.dashDir;
+    player.vy = 0;
+    player.dashTimer--;
+  } else {
+    player.vy += GRAVITY;
+  }
+  if (player.dashCooldown > 0) player.dashCooldown--;
+
+  player.x += player.vx;
+  resolveX();
+  player.y += player.vy;
+  player.onGround = false;
+  resolveY();
+
+  if (player.x < 0) { player.x = 0; player.vx = 0; }
+  if (player.x + player.w > W) { player.x = W - player.w; player.vx = 0; }
+  if (player.y > H + 200) {
+    respawn();
+  }
+
+  updateBots();
+  handleBotCollisions();
+  updateBoss();
+  handleBossCollision();
+  updateProjectiles();
+
+  if (player.invulnTimer > 0) player.invulnTimer--;
+
+  if (goal && overlap(player, goal)) {
+    levelComplete = true;
+    levelCompleteTimer = 0;
+    advanceQueued = false;
+  }
+
+  // Deferred respawn: handle death at the end of the tick so nothing mutates
+  // state (clears projectiles, resets boss) while another loop is iterating.
+  if (player.hearts <= 0) respawn();
+}
+
+function updateBots() {
+  for (const b of bots) {
+    if (b.stunTimer > 0) {
+      b.stunTimer--;
+      continue;
+    }
+    b.x += b.vx;
+    if (b.x < b.patrolMin)         { b.x = b.patrolMin;          b.vx =  b.speed; }
+    if (b.x + b.w > b.patrolMax)   { b.x = b.patrolMax - b.w;    b.vx = -b.speed; }
+  }
+}
+
+function handleBotCollisions() {
+  // Dashing into an un-stunned bot stuns it and auto-mounts the player on top.
+  if (player.dashTimer > 0) {
+    for (const b of bots) {
+      if (b.stunTimer > 0) continue;
+      if (overlap(player, b)) {
+        b.stunTimer = STUN_DURATION;
+        b.vx = 0;
+        // auto-mount: snap onto bot's top
+        player.y = b.y - player.h;
+        player.vy = 0;
+        player.vx = 0;
+        player.dashTimer = 0;
+        player.onGround = true;
+        return;
+      }
+    }
+  }
+
+  // Touching an un-stunned bot (not dashing, not invulnerable) hurts.
+  if (player.invulnTimer > 0) return;
+  for (const b of bots) {
+    if (b.stunTimer > 0) continue;
+    if (overlap(player, b)) {
+      hurtPlayer(b);
+      return;
+    }
+  }
+}
+
+function hurtPlayer(source) {
+  player.hearts--;
+  player.invulnTimer = INVULN_FRAMES;
+  const dir = (player.x + player.w / 2) < (source.x + source.w / 2) ? -1 : 1;
+  player.vx = HURT_KNOCKBACK_X * dir;
+  player.vy = HURT_KNOCKBACK_Y;
+  // Don't respawn here — it would clear projectiles[] mid-iteration upstream.
+  // The respawn check happens at the end of update().
+}
+
+function respawn() {
+  player.x = spawn.x;
+  player.y = spawn.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.dashTimer = 0;
+  player.dashCooldown = 0;
+  player.superBoost = 0;
+  player.hearts = MAX_HEARTS;
+  player.invulnTimer = 0;
+  player.facing = 1;
+
+  // Reset boss + clear projectiles so dying doesn't let you cheese the fight
+  projectiles = [];
+  if (boss) {
+    const lvDef = LEVELS[currentLevel];
+    if (lvDef.boss) {
+      boss.hp = lvDef.boss.hp;
+      boss.state = 'vulnerable';
+      boss.stateTimer = BOSS_VULN_FRAMES;
+      boss.projTimer = 0;
+    }
+  }
+}
+
+function getSolids() {
+  const solids = platforms.slice();
+  for (const b of bots) if (b.stunTimer > 0) solids.push(b);
+  if (boss && boss.state === 'stunned') solids.push(boss);
+  return solids;
+}
+
+function bossTiming(boss) {
+  // Final boss: shorter vulnerable window, longer & denser attacks, faster telegraph
+  if (boss && boss.isFinal) {
+    return {
+      vuln: 120,       // 2.0s (was 3.0s)
+      tele: 35,        // 0.58s (was 0.83s)
+      atk:  180,       // 3.0s (was 2.0s)
+      projInterval: 14,// every 0.23s (was 0.33s) — ~13 projectiles per barrage
+    };
+  }
+  return {
+    vuln: BOSS_VULN_FRAMES,
+    tele: BOSS_TELE_FRAMES,
+    atk:  BOSS_ATK_FRAMES,
+    projInterval: BOSS_PROJ_INTERVAL,
+  };
+}
+
+function updateBoss() {
+  if (!boss || boss.state === 'defeated') return;
+  boss.stateTimer--;
+  const tim = bossTiming(boss);
+
+  if (boss.state === 'attacking') {
+    boss.projTimer--;
+    if (boss.projTimer <= 0) {
+      spawnBossProjectile();
+      boss.projTimer = tim.projInterval;
+    }
+  }
+
+  if (boss.stateTimer <= 0) {
+    switch (boss.state) {
+      case 'vulnerable':
+        boss.state = 'telegraph';
+        boss.stateTimer = tim.tele;
+        break;
+      case 'telegraph':
+        boss.state = 'attacking';
+        boss.stateTimer = tim.atk;
+        boss.projTimer = 0;
+        break;
+      case 'attacking':
+        boss.state = 'vulnerable';
+        boss.stateTimer = tim.vuln;
+        break;
+    }
+  }
+}
+
+function spawnBossProjectile() {
+  if (!boss) return;
+  const dir = (player.x + player.w / 2) > (boss.x + boss.w / 2) ? 1 : -1;
+  const speed = boss.isFinal ? BOSS_PROJ_SPEED + 1 : BOSS_PROJ_SPEED;
+  projectiles.push({
+    x: dir > 0 ? boss.x + boss.w : boss.x - 14,
+    y: boss.y + boss.h - 30,
+    w: 14, h: 10,
+    vx: dir * speed,
+  });
+  // Final boss also fires the OPPOSITE direction so you can't just hide behind it
+  if (boss.isFinal) {
+    projectiles.push({
+      x: dir > 0 ? boss.x - 14 : boss.x + boss.w,
+      y: boss.y + boss.h - 30,
+      w: 14, h: 10,
+      vx: -dir * speed,
+    });
+  }
+}
+
+function updateProjectiles() {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx;
+    if (p.x < -30 || p.x > W + 30) {
+      projectiles.splice(i, 1);
+      continue;
+    }
+    if (player.invulnTimer <= 0 && player.dashTimer <= 0 && overlap(player, p)) {
+      hurtPlayer(p);
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+function handleBossCollision() {
+  if (!boss || boss.state === 'defeated') return;
+
+  // Dash hits a vulnerable boss → damage + knockback + boss counter-attacks
+  if (player.dashTimer > 0 && boss.state === 'vulnerable' && overlap(player, boss)) {
+    boss.hp--;
+    // Knock the player back opposite the dash direction. Use superBoost so the
+    // velocity isn't immediately capped to MAX_SPEED.
+    const dir = -player.dashDir;
+    player.vx = 11 * dir;
+    player.vy = -9;
+    player.dashTimer = 0;
+    player.superBoost = SUPER_BOOST_FRAMES;
+    player.invulnTimer = 12; // tiny i-frames just to clear the boss hitbox cleanly
+
+    if (boss.hp <= 0) {
+      boss.state = 'defeated';
+      levelComplete = true;
+      levelCompleteTimer = 0;
+      advanceQueued = false;
+    } else {
+      // No freeze — boss immediately winds up an attack (timing depends on boss type)
+      boss.state = 'telegraph';
+      boss.stateTimer = bossTiming(boss).tele;
+    }
+    return;
+  }
+
+  // Touching the boss in any non-defeated state hurts (no stun phase anymore)
+  if (player.dashTimer > 0) return;
+  if (player.invulnTimer > 0) return;
+  if (overlap(player, boss)) {
+    hurtPlayer(boss);
+  }
+}
+
+function resolveX() {
+  for (const p of getSolids()) {
+    if (overlap(player, p)) {
+      if (player.vx > 0) player.x = p.x - player.w;
+      else if (player.vx < 0) player.x = p.x + p.w;
+      player.vx = 0;
+      player.dashTimer = 0;
+    }
+  }
+}
+
+function resolveY() {
+  for (const p of getSolids()) {
+    if (overlap(player, p)) {
+      if (player.vy > 0) {
+        player.y = p.y - player.h;
+        player.onGround = true;
+      } else if (player.vy < 0) {
+        player.y = p.y + p.h;
+      }
+      player.vy = 0;
+    }
+  }
+}
+
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+const THEME_SKY = {
+  field:   ['#87ceeb', '#cfeaff'],
+  factory: ['#2a2735', '#5a4f60'],
+  cave:    ['#1a1216', '#3a2826'],
+  sky:     ['#bce0ff', '#ffffff'],
+  volcano: ['#1a0808', '#6a1a0a'],
+  ice:     ['#a8d8e8', '#e8f8ff'],
+  desert:  ['#f4c860', '#f4a060'],
+  forest:  ['#1f3320', '#395538'],
+  ocean:   ['#062a48', '#1a5878'],
+  cosmic:  ['#08001a', '#2c0a4a'],
+};
+
+function drawSky() {
+  const colors = THEME_SKY[currentTheme] || THEME_SKY.field;
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, colors[0]);
+  grad.addColorStop(1, colors[1]);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  if (currentTheme === 'factory') {
+    ctx.fillStyle = 'rgba(180, 170, 200, 0.18)';
+    for (let i = 0; i < 5; i++) ctx.fillRect(60 + i * 170, 0, 8, H);
+    for (let i = 0; i < W; i += 24) {
+      ctx.fillStyle = (Math.floor(i / 24) % 2) ? '#3a2a18' : '#a07020';
+      ctx.fillRect(i, 0, 24, 6);
+    }
+  } else if (currentTheme === 'cave') {
+    // dim stalactites
+    ctx.fillStyle = '#221816';
+    for (let i = 0; i < 8; i++) {
+      const x = 40 + i * 100;
+      ctx.fillRect(x, 0, 14, 22 + (i * 37) % 28);
+      ctx.fillRect(x + 4, 22, 6, 12);
+    }
+    // sparse glow dots
+    ctx.fillStyle = 'rgba(255, 200, 120, 0.55)';
+    for (let i = 0; i < 6; i++) {
+      const sx = (i * 211 + 53) % W;
+      const sy = 40 + (i * 137 + 23) % 200;
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+  } else if (currentTheme === 'sky') {
+    // soft clouds
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    for (let i = 0; i < 5; i++) {
+      const cx = 80 + i * 160;
+      const cy = 60 + (i % 2) * 70;
+      ctx.fillRect(cx, cy, 80, 18);
+      ctx.fillRect(cx + 12, cy - 8, 56, 8);
+      ctx.fillRect(cx + 8, cy + 18, 64, 6);
+    }
+  } else if (currentTheme === 'volcano') {
+    // ember particles
+    const t = performance.now() / 80;
+    ctx.fillStyle = 'rgba(255, 180, 80, 0.6)';
+    for (let i = 0; i < 18; i++) {
+      const ex = (i * 67 + 23) % W;
+      const ey = (H - ((t * (0.5 + (i % 4) * 0.2)) + (i * 91)) % H);
+      ctx.fillRect(ex, ey, 2, 2);
+    }
+    // back lava silhouette
+    ctx.fillStyle = 'rgba(140, 30, 10, 0.5)';
+    for (let i = 0; i < W; i += 30) {
+      const h = 30 + ((i * 13) % 25);
+      ctx.fillRect(i, H - 60 - h, 30, h);
+    }
+  } else if (currentTheme === 'ice') {
+    // snow
+    const t = performance.now() / 30;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    for (let i = 0; i < 30; i++) {
+      const sx = (i * 53 + (t * 0.5)) % W;
+      const sy = ((i * 91) + t) % H;
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+  } else if (currentTheme === 'desert') {
+    // distant dunes
+    ctx.fillStyle = 'rgba(200, 130, 50, 0.6)';
+    for (let i = 0; i < W; i += 40) {
+      const h = 35 + ((i * 17) % 30);
+      ctx.fillRect(i, H - 80 - h, 40, h);
+    }
+    // sun
+    ctx.fillStyle = 'rgba(255, 230, 130, 0.8)';
+    ctx.fillRect(W - 100, 50, 40, 40);
+    ctx.fillStyle = 'rgba(255, 230, 130, 0.3)';
+    ctx.fillRect(W - 108, 58, 56, 24);
+    ctx.fillRect(W - 96,  42, 32, 56);
+  } else if (currentTheme === 'forest') {
+    // tree silhouettes
+    ctx.fillStyle = 'rgba(20, 30, 16, 0.8)';
+    for (let i = 0; i < 7; i++) {
+      const x = 30 + i * 115;
+      ctx.fillRect(x, 60, 14, H - 60);
+      ctx.fillRect(x - 30, 60, 74, 90);
+      ctx.fillRect(x - 22, 40, 58, 60);
+      ctx.fillRect(x - 10, 20, 34, 40);
+    }
+  } else if (currentTheme === 'ocean') {
+    // bubbles
+    const t = performance.now() / 50;
+    ctx.fillStyle = 'rgba(180, 230, 255, 0.45)';
+    for (let i = 0; i < 14; i++) {
+      const bx = (i * 73 + 19) % W;
+      const by = (H - ((t * (0.6 + (i % 3) * 0.3)) + i * 91) % H);
+      const size = 3 + (i % 3);
+      ctx.fillRect(bx, by, size, size);
+    }
+    // wavy light from above
+    ctx.fillStyle = 'rgba(140, 200, 255, 0.18)';
+    for (let i = 0; i < W; i += 40) {
+      ctx.fillRect(i + Math.sin(t / 10 + i) * 4, 0, 12, 80);
+    }
+  } else if (currentTheme === 'cosmic') {
+    // starfield
+    for (let i = 0; i < 70; i++) {
+      const sx = (i * 137 + 23) % W;
+      const sy = (i * 211 + 17) % H;
+      const tw = (performance.now() / 400 + i * 0.4);
+      const a = 0.4 + 0.6 * ((Math.sin(tw) + 1) / 2);
+      ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+    // distant nebula glow
+    ctx.fillStyle = 'rgba(180, 80, 220, 0.18)';
+    ctx.fillRect(160, 60, 220, 140);
+    ctx.fillStyle = 'rgba(80, 180, 220, 0.14)';
+    ctx.fillRect(420, 100, 240, 160);
+  }
+}
+
+const THEME_PLAT = {
+  field:   { body: '#4a7a2a', top: '#6da93b' },
+  factory: { body: '#3a3a48', top: '#6a6a78' },
+  cave:    { body: '#3a2a1a', top: '#6a4a30' },
+  sky:     { body: '#dfe9f5', top: '#ffffff' },
+  volcano: { body: '#2a0808', top: '#5a1a10' },
+  ice:     { body: '#90c0d8', top: '#e0f0ff' },
+  desert:  { body: '#a06030', top: '#d4a050' },
+  forest:  { body: '#2a3a1a', top: '#4a7a2a' },
+  ocean:   { body: '#1a4060', top: '#3a6a80' },
+  cosmic:  { body: '#3a1060', top: '#7a4ac8' },
+};
+
+function drawPlatform(p) {
+  const palette = THEME_PLAT[currentTheme] || THEME_PLAT.field;
+  ctx.fillStyle = palette.body;
+  ctx.fillRect(p.x, p.y, p.w, p.h);
+  ctx.fillStyle = palette.top;
+  ctx.fillRect(p.x, p.y, p.w, 5);
+
+  // theme-specific surface details
+  if (currentTheme === 'factory') {
+    ctx.fillStyle = '#aaaab8';
+    for (let rx = p.x + 6; rx < p.x + p.w - 4; rx += 14) ctx.fillRect(rx, p.y + 1, 2, 2);
+  } else if (currentTheme === 'volcano') {
+    // lava cracks along the top
+    ctx.fillStyle = '#ff6622';
+    for (let rx = p.x + 4; rx < p.x + p.w - 4; rx += 12) {
+      if ((rx + p.y) % 3 === 0) ctx.fillRect(rx, p.y + 1, 4, 2);
+    }
+  } else if (currentTheme === 'cave') {
+    // sparse crystal dots
+    ctx.fillStyle = '#aa66ff';
+    for (let rx = p.x + 6; rx < p.x + p.w - 6; rx += 18) {
+      if ((rx + p.y * 7) % 2 === 0) ctx.fillRect(rx, p.y + 2, 2, 2);
+    }
+  } else if (currentTheme === 'ice') {
+    // frost speckle
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    for (let rx = p.x + 4; rx < p.x + p.w - 4; rx += 8) ctx.fillRect(rx, p.y + 1, 1, 1);
+  } else if (currentTheme === 'desert') {
+    // sand grains
+    ctx.fillStyle = '#f4d080';
+    for (let rx = p.x + 6; rx < p.x + p.w - 4; rx += 9) ctx.fillRect(rx, p.y + 2, 1, 1);
+  } else if (currentTheme === 'forest') {
+    // mossy patches
+    ctx.fillStyle = '#5a8a3a';
+    for (let rx = p.x + 4; rx < p.x + p.w - 4; rx += 11) ctx.fillRect(rx, p.y, 4, 2);
+  } else if (currentTheme === 'cosmic') {
+    // shimmer dots
+    const t = performance.now() / 200;
+    for (let rx = p.x + 6; rx < p.x + p.w - 4; rx += 12) {
+      const a = 0.4 + 0.6 * ((Math.sin(t + rx * 0.2) + 1) / 2);
+      ctx.fillStyle = `rgba(180, 120, 255, ${a})`;
+      ctx.fillRect(rx, p.y + 1, 2, 2);
+    }
+  }
+}
+
+function drawPlayer() {
+  const dashing = player.dashTimer > 0;
+  const supering = player.superBoost > 0;
+  const flashing = player.invulnTimer > 0 && Math.floor(player.invulnTimer / 4) % 2 === 0;
+  if (flashing) return;
+
+  if (dashing) {
+    ctx.fillStyle = 'rgba(120, 200, 255, 0.35)';
+    for (let i = 1; i <= 3; i++) {
+      const tx = player.x - player.dashDir * i * 8;
+      ctx.fillRect(tx, player.y, player.w, player.h);
+    }
+  } else if (supering) {
+    // pink/magenta super trail
+    const alpha = player.superBoost / SUPER_BOOST_FRAMES;
+    ctx.fillStyle = `rgba(255, 120, 200, ${0.45 * alpha})`;
+    const dir = player.vx >= 0 ? -1 : 1;
+    for (let i = 1; i <= 3; i++) {
+      ctx.fillRect(player.x + dir * i * 6, player.y, player.w, player.h);
+    }
+  }
+
+  const bodyColor = dashing ? '#7ecbff' : (supering ? '#ffaadd' : '#ffcc44');
+  const footColor = dashing ? '#3a8acc' : (supering ? '#cc4488' : '#cc8800');
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(player.x, player.y, player.w, player.h);
+  ctx.fillStyle = footColor;
+  ctx.fillRect(player.x, player.y + player.h - 4, player.w, 4);
+
+  ctx.fillStyle = '#000';
+  const eyeOffset = player.facing === 1 ? player.w - 9 : 4;
+  ctx.fillRect(player.x + eyeOffset, player.y + 10, 5, 5);
+
+  if (player.dashCooldown > 0 && !dashing) {
+    const pct = 1 - (player.dashCooldown / DASH_COOLDOWN);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(player.x, player.y - 8, player.w, 4);
+    ctx.fillStyle = '#7ecbff';
+    ctx.fillRect(player.x, player.y - 8, player.w * pct, 4);
+  }
+}
+
+const WAKE_WARNING_FRAMES = 75; // last ~1.25s of stun = shake/flash
+
+function drawFloaterBot(b) {
+  const stunned = b.stunTimer > 0;
+  const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
+  const t = performance.now() / 300;
+
+  // Hover bob (visual only; collision uses fixed y)
+  let bobY = stunned ? 0 : Math.sin(t + b.x * 0.01) * 2;
+  let shakeX = 0, shakeY = 0;
+  if (wakingUp) {
+    const intensity = 1 + (1 - b.stunTimer / WAKE_WARNING_FRAMES) * 3;
+    shakeX = (Math.random() - 0.5) * 2 * intensity;
+    shakeY = (Math.random() - 0.5) * 1.5 * intensity;
+  }
+  const dx = b.x + shakeX;
+  const dy = b.y + bobY + shakeY;
+
+  // shadow on the ground would be too far — skip
+
+  // outer glow
+  if (stunned) {
+    if (wakingUp) {
+      const flash = (Math.sin(b.stunTimer * 0.6) + 1) / 2;
+      ctx.fillStyle = `rgba(255, ${Math.floor(80 + flash * 100)}, 60, ${0.35 + flash * 0.3})`;
+    } else {
+      ctx.fillStyle = 'rgba(120, 200, 255, 0.35)';
+    }
+    ctx.fillRect(dx - 4, dy - 4, b.w + 8, b.h + 8);
+  } else {
+    // idle hover halo (faint cyan-ish exhaust below)
+    ctx.fillStyle = 'rgba(255, 180, 60, 0.18)';
+    ctx.fillRect(dx + 4, dy + b.h, b.w - 8, 4);
+    ctx.fillStyle = 'rgba(255, 180, 60, 0.10)';
+    ctx.fillRect(dx + 8, dy + b.h + 4, b.w - 16, 3);
+  }
+
+  // body — round-ish via stacked rects
+  let bodyColor = '#d97a2a';
+  let bodyDark  = '#a04a0c';
+  if (stunned) {
+    if (wakingUp) {
+      const flash = Math.floor(b.stunTimer / 6) % 2 === 0;
+      bodyColor = flash ? '#ff7755' : '#7ecbff';
+      bodyDark  = flash ? '#cc3322' : '#3a8acc';
+    } else {
+      bodyColor = '#7ecbff';
+      bodyDark  = '#3a8acc';
+    }
+  }
+  // top + bottom slimmer rows make it look round
+  ctx.fillStyle = bodyDark;
+  ctx.fillRect(dx + 4, dy,                 b.w - 8, 3);
+  ctx.fillRect(dx + 4, dy + b.h - 3,       b.w - 8, 3);
+  ctx.fillRect(dx,     dy + 3,             b.w,     b.h - 6);
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(dx + 6, dy + 1,             b.w - 12, 1);
+  ctx.fillRect(dx + 2, dy + 4,             b.w - 4,  b.h - 8);
+
+  // little propeller "tail" lights along the sides
+  if (!stunned) {
+    const blink = Math.floor(t * 4) % 2;
+    ctx.fillStyle = blink ? '#ffee44' : '#cc8800';
+    ctx.fillRect(dx + 1,           dy + b.h / 2 - 1, 2, 2);
+    ctx.fillRect(dx + b.w - 3,     dy + b.h / 2 - 1, 2, 2);
+  }
+
+  // eyes
+  if (stunned) {
+    if (wakingUp) {
+      const open = Math.floor(b.stunTimer / 8) % 2 === 0;
+      ctx.fillStyle = open ? '#ff3344' : '#222';
+      ctx.fillRect(dx + 7,         dy + 10, 4, 3);
+      ctx.fillRect(dx + b.w - 11,  dy + 10, 4, 3);
+    } else {
+      ctx.fillStyle = '#222';
+      ctx.fillRect(dx + 6,         dy + 11, 6, 2);
+      ctx.fillRect(dx + b.w - 12,  dy + 11, 6, 2);
+    }
+  } else {
+    const facingRight = b.vx >= 0;
+    ctx.fillStyle = '#ffffff';
+    if (facingRight) {
+      ctx.fillRect(dx + b.w - 13, dy + 9, 4, 5);
+      ctx.fillRect(dx + b.w - 7,  dy + 9, 4, 5);
+    } else {
+      ctx.fillRect(dx + 3, dy + 9, 4, 5);
+      ctx.fillRect(dx + 9, dy + 9, 4, 5);
+    }
+    ctx.fillStyle = '#222';
+    if (facingRight) {
+      ctx.fillRect(dx + b.w - 11, dy + 10, 2, 3);
+      ctx.fillRect(dx + b.w - 5,  dy + 10, 2, 3);
+    } else {
+      ctx.fillRect(dx + 5, dy + 10, 2, 3);
+      ctx.fillRect(dx + 11, dy + 10, 2, 3);
+    }
+  }
+
+  // exclamation mark above bot when about to wake
+  if (wakingUp) {
+    const bob = Math.sin(b.stunTimer * 0.4) * 2;
+    ctx.fillStyle = '#ffee44';
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 18 + bob, 4, 8);
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 8 + bob,  4, 3);
+    ctx.fillStyle = '#cc8800';
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 18 + bob, 1, 11);
+  }
+
+  // stun-time bar
+  if (stunned) {
+    const pct = b.stunTimer / STUN_DURATION;
+    const r = Math.floor(255 - 135 * pct);
+    const g = Math.floor( 80 + 120 * pct);
+    const bl = Math.floor( 80 + 175 * pct);
+    const barY = wakingUp ? b.y - 28 : b.y - 7;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(b.x, barY, b.w, 4);
+    ctx.fillStyle = `rgb(${r}, ${g}, ${bl})`;
+    ctx.fillRect(b.x, barY, b.w * pct, 4);
+  }
+}
+
+function drawBot(b) {
+  if (b.type === 'floater') {
+    drawFloaterBot(b);
+    return;
+  }
+  const stunned = b.stunTimer > 0;
+  const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
+
+  // Shake offset — only used for drawing, not for collision/logic
+  let shakeX = 0;
+  let shakeY = 0;
+  if (wakingUp) {
+    // intensity ramps up as wake-up approaches: 1 → ~4
+    const intensity = 1 + (1 - b.stunTimer / WAKE_WARNING_FRAMES) * 3;
+    shakeX = (Math.random() - 0.5) * 2 * intensity;
+    shakeY = (Math.random() - 0.5) * 1.5 * intensity;
+  }
+  const dx = b.x + shakeX;
+  const dy = b.y + shakeY;
+
+  // shadow under bot (no shake)
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fillRect(b.x + 2, b.y + b.h - 2, b.w - 4, 2);
+
+  // glow halo: blue when calm, flashing red/orange when waking
+  if (stunned) {
+    if (wakingUp) {
+      // pulsing red warning
+      const flash = (Math.sin(b.stunTimer * 0.6) + 1) / 2;
+      ctx.fillStyle = `rgba(255, ${Math.floor(80 + flash * 100)}, 60, ${0.35 + flash * 0.3})`;
+    } else {
+      ctx.fillStyle = 'rgba(120, 200, 255, 0.35)';
+    }
+    ctx.fillRect(dx - 3, dy - 3, b.w + 6, b.h + 6);
+  }
+
+  // body color
+  let bodyColor = '#8a8a95';
+  let bodyDark = '#5a5a65';
+  if (stunned) {
+    if (wakingUp) {
+      // flash between blue and red
+      const flash = Math.floor(b.stunTimer / 6) % 2 === 0;
+      bodyColor = flash ? '#ff7755' : '#7ecbff';
+      bodyDark  = flash ? '#cc3322' : '#3a8acc';
+    } else {
+      bodyColor = '#7ecbff';
+      bodyDark  = '#3a8acc';
+    }
+  }
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(dx, dy + 6, b.w, b.h - 6);
+  ctx.fillStyle = bodyDark;
+  ctx.fillRect(dx, dy + b.h - 4, b.w, 4);
+
+  // grass tufts on top
+  ctx.fillStyle = '#4a7a2a';
+  ctx.fillRect(dx + 2,         dy + 2, 6, 6);
+  ctx.fillRect(dx + 11,        dy,     6, 8);
+  ctx.fillRect(dx + b.w - 8,   dy + 3, 6, 5);
+  ctx.fillStyle = '#6da93b';
+  ctx.fillRect(dx + 12,        dy + 1, 3, 4);
+
+  if (stunned) {
+    if (wakingUp) {
+      // eyes cracking open: small red slits, blink rapidly
+      const open = Math.floor(b.stunTimer / 8) % 2 === 0;
+      ctx.fillStyle = open ? '#ff3344' : '#222';
+      const eyeY = dy + 13;
+      ctx.fillRect(dx + 7,  eyeY, 4, 3);
+      ctx.fillRect(dx + 19, eyeY, 4, 3);
+    } else {
+      // closed eyes (zzz)
+      ctx.fillStyle = '#222';
+      const cy = dy + 14;
+      ctx.fillRect(dx + 6,  cy, 6, 2);
+      ctx.fillRect(dx + 18, cy, 6, 2);
+    }
+  } else {
+    // open angry eyes, facing direction of travel
+    const facingRight = b.vx >= 0;
+    ctx.fillStyle = '#ff3344';
+    const eyeY = dy + 12;
+    if (facingRight) {
+      ctx.fillRect(dx + b.w - 12, eyeY, 4, 4);
+      ctx.fillRect(dx + b.w - 6,  eyeY, 4, 4);
+    } else {
+      ctx.fillRect(dx + 2, eyeY, 4, 4);
+      ctx.fillRect(dx + 8, eyeY, 4, 4);
+    }
+  }
+
+  // exclamation mark above bot when about to wake
+  if (wakingUp) {
+    const bob = Math.sin(b.stunTimer * 0.4) * 2;
+    ctx.fillStyle = '#ffee44';
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 18 + bob, 4, 8);
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 8 + bob,  4, 3);
+    ctx.fillStyle = '#cc8800';
+    ctx.fillRect(dx + b.w / 2 - 2, dy - 18 + bob, 1, 11);
+  }
+
+  // stun-time bar above bot
+  if (stunned) {
+    const pct = b.stunTimer / STUN_DURATION;
+    const r = Math.floor(255 - 135 * pct);
+    const g = Math.floor( 80 + 120 * pct);
+    const bl = Math.floor( 80 + 175 * pct);
+    const barY = wakingUp ? b.y - 28 : b.y - 7;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(b.x, barY, b.w, 4);
+    ctx.fillStyle = `rgb(${r}, ${g}, ${bl})`;
+    ctx.fillRect(b.x, barY, b.w * pct, 4);
+  }
+}
+
+function drawHUD() {
+  for (let i = 0; i < MAX_HEARTS; i++) {
+    const x = 12 + i * 28;
+    const y = 12;
+    const filled = i < player.hearts;
+    ctx.fillStyle = filled ? '#ff4466' : 'rgba(0,0,0,0.25)';
+    drawHeart(x, y, filled);
+  }
+  // Level label, top-right
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.font = '600 16px -apple-system, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(levelName, W - 14, 28);
+  ctx.textAlign = 'left';
+}
+
+// Baba-style rule images
+const flagImg = new Image();
+flagImg.src = 'assets/flag.png';
+const isImg = new Image();
+isImg.src = 'assets/is.png';
+const winImg = new Image();
+winImg.src = 'assets/win.png';
+
+function drawBabaRule() {
+  if (!babaRule) return;
+  const bob = Math.sin(performance.now() / 450) * 2.5;
+  const size = 44;
+  const gap = 8;
+  const y = babaRule.y + bob;
+  let x = babaRule.x;
+
+  const prevSmooth = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
+
+  if (flagImg.complete && flagImg.naturalWidth) ctx.drawImage(flagImg, x, y, size, size);
+  x += size + gap;
+  if (isImg.complete && isImg.naturalWidth)   ctx.drawImage(isImg,   x, y, size, size);
+  x += size + gap;
+  if (winImg.complete && winImg.naturalWidth) ctx.drawImage(winImg,  x, y, size, size);
+
+  ctx.imageSmoothingEnabled = prevSmooth;
+}
+
+function drawGoal() {
+  if (!goal) return;
+  // pole
+  ctx.fillStyle = '#7a5a2a';
+  ctx.fillRect(goal.x + goal.w / 2 - 2, goal.y, 4, goal.h);
+  // flag — pulses with a gentle wave
+  const t = performance.now() / 200;
+  const wave = Math.sin(t) * 3;
+  ctx.fillStyle = '#ffdd33';
+  ctx.fillRect(goal.x + goal.w / 2 + 2, goal.y + 4 + wave, 18, 14);
+  ctx.fillStyle = '#cc8800';
+  ctx.fillRect(goal.x + goal.w / 2 + 2, goal.y + 16 + wave, 18, 2);
+  // sparkles
+  for (let i = 0; i < 3; i++) {
+    const sx = goal.x + goal.w / 2 + Math.sin(t * 1.3 + i * 2) * 14;
+    const sy = goal.y + 30 + Math.cos(t * 1.1 + i * 1.7) * 18;
+    ctx.fillStyle = 'rgba(255, 230, 100, 0.7)';
+    ctx.fillRect(sx, sy, 3, 3);
+  }
+}
+
+function drawBoss() {
+  if (!boss) return;
+
+  const t = performance.now() / 200;
+  const state = boss.state;
+  let bodyColor, bodyDark, eyeColor, eyeShape = 'open';
+
+  if (state === 'defeated') {
+    bodyColor = '#333';
+    bodyDark  = '#1a1a1a';
+    eyeColor  = '#444';
+    eyeShape  = 'x';
+  } else if (state === 'stunned') {
+    bodyColor = '#7ecbff';
+    bodyDark  = '#3a8acc';
+    eyeColor  = '#222';
+    eyeShape  = 'closed';
+  } else if (state === 'telegraph') {
+    const flash = Math.floor(boss.stateTimer / 6) % 2 === 0;
+    bodyColor = flash ? '#ff5544' : '#aa6655';
+    bodyDark  = flash ? '#aa2211' : '#552222';
+    eyeColor  = '#ffee44';
+  } else if (state === 'attacking') {
+    bodyColor = '#ff3322';
+    bodyDark  = '#88110a';
+    eyeColor  = '#ffee44';
+  } else {
+    // vulnerable
+    bodyColor = '#9a9aab';
+    bodyDark  = '#5a5a6a';
+    eyeColor  = '#33ff66';
+  }
+
+  // shake when telegraphing or attacking
+  let shakeX = 0;
+  if (state === 'telegraph' || state === 'attacking') {
+    const intensity = state === 'attacking' ? 1.5 : 2.5;
+    shakeX = (Math.random() - 0.5) * intensity;
+  }
+  const bx = boss.x + shakeX;
+  const by = boss.y;
+
+  // outer glow during telegraph/attack
+  if (state === 'telegraph' || state === 'attacking') {
+    ctx.fillStyle = state === 'attacking' ? 'rgba(255, 60, 30, 0.35)' : 'rgba(255, 200, 60, 0.25)';
+    ctx.fillRect(bx - 6, by - 6, boss.w + 12, boss.h + 12);
+  }
+  if (state === 'vulnerable') {
+    const pulse = (Math.sin(t * 2) + 1) / 2;
+    ctx.fillStyle = `rgba(60, 255, 120, ${0.18 + pulse * 0.18})`;
+    ctx.fillRect(bx - 4, by - 4, boss.w + 8, boss.h + 8);
+  }
+
+  // body — chunky rectangles for a robot look
+  ctx.fillStyle = bodyDark;
+  ctx.fillRect(bx, by, boss.w, boss.h);
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(bx + 4, by + 4, boss.w - 8, boss.h - 8);
+
+  // shoulder bolts
+  ctx.fillStyle = '#222';
+  ctx.fillRect(bx + 6,             by + 8,  6, 6);
+  ctx.fillRect(bx + boss.w - 12,   by + 8,  6, 6);
+
+  // visor / face plate
+  ctx.fillStyle = '#222';
+  ctx.fillRect(bx + 10, by + 20, boss.w - 20, 22);
+
+  // eye
+  if (eyeShape === 'closed') {
+    ctx.fillStyle = '#666';
+    ctx.fillRect(bx + 18, by + 30, boss.w - 36, 3);
+  } else if (eyeShape === 'x') {
+    ctx.fillStyle = '#666';
+    ctx.fillRect(bx + 18, by + 26, 4, 12);
+    ctx.fillRect(bx + boss.w - 22, by + 26, 4, 12);
+  } else {
+    ctx.fillStyle = eyeColor;
+    const eyeW = boss.w - 36;
+    ctx.fillRect(bx + 18, by + 26, eyeW, 10);
+    if (state === 'attacking') {
+      // pupil tracking player
+      const px = player.x + player.w / 2;
+      const ex = bx + 18 + eyeW / 2;
+      const lookDir = Math.max(-1, Math.min(1, (px - ex) / 100));
+      ctx.fillStyle = '#222';
+      ctx.fillRect(bx + 18 + eyeW / 2 - 3 + lookDir * (eyeW / 2 - 4), by + 28, 6, 6);
+    }
+  }
+
+  // chest panel ("mouth") — width scales with max HP so all HP ticks fit
+  const maxHp = boss.maxHp || boss.hp;
+  const tickGap = 2;
+  const tickW = Math.max(3, Math.min(10, Math.floor((boss.w - 28) / maxHp) - tickGap));
+  const ticksTotalW = maxHp * tickW + (maxHp - 1) * tickGap;
+  const panelW = Math.max(boss.w - 28, ticksTotalW + 12);
+  const panelX = bx + boss.w / 2 - panelW / 2;
+  ctx.fillStyle = bodyDark;
+  ctx.fillRect(panelX, by + boss.h - 24, panelW, 14);
+  ctx.fillStyle = '#ffaa33';
+  const ticksStartX = bx + boss.w / 2 - ticksTotalW / 2;
+  for (let i = 0; i < boss.hp; i++) {
+    ctx.fillRect(ticksStartX + i * (tickW + tickGap), by + boss.h - 20, tickW, 6);
+  }
+
+  // HP label above boss
+  if (state !== 'defeated') {
+    const maxHp = boss.maxHp || boss.hp;
+    const slotW = 14;
+    const slotGap = 3;
+    const totalW = maxHp * slotW + (maxHp - 1) * slotGap;
+    const startX = bx + boss.w / 2 - totalW / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(startX - 4, by - 14, totalW + 8, 8);
+    for (let i = 0; i < maxHp; i++) {
+      ctx.fillStyle = (i < boss.hp) ? '#ff4466' : 'rgba(255,255,255,0.2)';
+      ctx.fillRect(startX + i * (slotW + slotGap), by - 12, slotW, 4);
+    }
+  }
+
+}
+
+function drawProjectiles() {
+  for (const p of projectiles) {
+    // glow trail
+    ctx.fillStyle = 'rgba(255, 120, 60, 0.4)';
+    const tx = p.vx > 0 ? p.x - 8 : p.x + p.w;
+    ctx.fillRect(tx, p.y + 1, 8, p.h - 2);
+    // body
+    ctx.fillStyle = '#ff4422';
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = '#ffaa66';
+    ctx.fillRect(p.x, p.y + 2, p.w, 2);
+  }
+}
+
+function drawLevelComplete() {
+  // dim overlay
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(0, 0, W, H);
+  // title
+  ctx.fillStyle = '#ffee77';
+  ctx.font = '700 48px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Level Complete!', W / 2, H / 2 - 20);
+  // subtitle
+  ctx.fillStyle = '#fff';
+  ctx.font = '500 18px -apple-system, sans-serif';
+  const isLast = currentLevel + 1 >= LEVELS.length;
+  const blink = Math.floor(levelCompleteTimer / 30) % 2 === 0;
+  if (blink && levelCompleteTimer > 30) {
+    ctx.fillText(
+      isLast ? 'You finished all the levels! Press SPACE to play again.' : 'Press SPACE to continue',
+      W / 2, H / 2 + 30
+    );
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawHeart(x, y, filled) {
+  ctx.fillStyle = filled ? '#ff4466' : 'rgba(255,255,255,0.4)';
+  ctx.fillRect(x + 2, y,     6, 8);
+  ctx.fillRect(x + 12, y,    6, 8);
+  ctx.fillRect(x,     y + 4, 20, 6);
+  ctx.fillRect(x + 2, y + 10, 16, 4);
+  ctx.fillRect(x + 6, y + 14, 8, 3);
+  ctx.fillRect(x + 9, y + 17, 2, 2);
+  if (!filled) {
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(x + 4, y + 2, 12, 12);
+  }
+}
+
+function draw() {
+  drawSky();
+  drawBabaRule();
+  for (const p of platforms) drawPlatform(p);
+  drawGoal();
+  drawBoss();
+  for (const b of bots) drawBot(b);
+  drawProjectiles();
+  drawPlayer();
+  drawHUD();
+  if (levelComplete) drawLevelComplete();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loadLevel(loadSavedLevel());
+loop();
+</script>
+</body>
+</html>
