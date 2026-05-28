@@ -555,37 +555,36 @@ let jumpQueued = false;
 let dashQueued = false;
 let advanceQueued = false;
 
+// We key inputs by e.code (the physical key location), not e.key (the language-
+// dependent character). KeyA on a Hebrew layout is still "KeyA" even though
+// it physically prints ש. Means controls work regardless of input language.
 window.addEventListener('keydown', (e) => {
-  const k = e.key.toLowerCase();
-  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'enter'].includes(k)) {
+  const c = e.code;
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter'].includes(c)) {
     e.preventDefault();
   }
-  if (!keys[k]) {
-    if (k === 'w' || k === ' ' || k === 'arrowup') jumpQueued = true;
-    if (k === 'j' || k === 'shift') dashQueued = true;
-    if (k === ' ' || k === 'enter') advanceQueued = true;
-    if (k === 'r') {
-      loadLevel(currentLevel);
-    }
-    // Dev: 1-9 jumps to that level, 0 jumps to level 10
-    if (k >= '1' && k <= '9') {
-      const idx = parseInt(k, 10) - 1;
+  if (!keys[c]) {
+    if (c === 'KeyW' || c === 'Space' || c === 'ArrowUp') jumpQueued = true;
+    if (c === 'KeyJ' || c === 'ShiftLeft' || c === 'ShiftRight') dashQueued = true;
+    if (c === 'Space' || c === 'Enter') advanceQueued = true;
+    if (c === 'KeyR') loadLevel(currentLevel);
+    // Dev: Digit1-9 jumps to that level, Digit0 → level 10
+    if (c.startsWith('Digit') && c !== 'Digit0') {
+      const idx = parseInt(c.slice(5), 10) - 1;
       if (idx < LEVELS.length) loadLevel(idx);
     }
-    if (k === '0') {
-      if (9 < LEVELS.length) loadLevel(9);
-    }
-    // Dev: [ and ] step through any level (works past level 10)
-    if (k === ']' || k === '=') {
+    if (c === 'Digit0' && 9 < LEVELS.length) loadLevel(9);
+    // Dev: [ ] (or - =) step through any level
+    if (c === 'BracketRight' || c === 'Equal') {
       loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
     }
-    if (k === '[' || k === '-') {
+    if (c === 'BracketLeft' || c === 'Minus') {
       loadLevel(Math.max(0, currentLevel - 1));
     }
   }
-  keys[k] = true;
+  keys[c] = true;
 });
-window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
 
 // Touch / mouse controls for mobile
 function bindTouchButton(id, onPress, onRelease) {
@@ -602,17 +601,17 @@ function bindTouchButton(id, onPress, onRelease) {
 }
 
 bindTouchButton('btn-left',
-  () => { keys['a'] = true; },
-  () => { keys['a'] = false; });
+  () => { keys['KeyA'] = true; },
+  () => { keys['KeyA'] = false; });
 bindTouchButton('btn-right',
-  () => { keys['d'] = true; },
-  () => { keys['d'] = false; });
+  () => { keys['KeyD'] = true; },
+  () => { keys['KeyD'] = false; });
 bindTouchButton('btn-jump',
-  () => { jumpQueued = true; advanceQueued = true; keys['w'] = true; },
-  () => { keys['w'] = false; });
+  () => { jumpQueued = true; advanceQueued = true; keys['KeyW'] = true; },
+  () => { keys['KeyW'] = false; });
 bindTouchButton('btn-dash',
-  () => { dashQueued = true; keys['j'] = true; },
-  () => { keys['j'] = false; });
+  () => { dashQueued = true; keys['KeyJ'] = true; },
+  () => { keys['KeyJ'] = false; });
 
 const SAVE_KEY = 'platformer.currentLevel';
 
@@ -678,8 +677,8 @@ function update() {
     return;
   }
 
-  const left  = pressing('a', 'arrowleft');
-  const right = pressing('d', 'arrowright');
+  const left  = pressing('KeyA', 'ArrowLeft');
+  const right = pressing('KeyD', 'ArrowRight');
 
   const dashing = player.dashTimer > 0;
 
