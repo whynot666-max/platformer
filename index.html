@@ -849,26 +849,33 @@ function updateBots() {
 }
 
 function handleBotCollisions() {
-  // Dashing into an un-stunned bot stuns it and auto-mounts the player on top.
-  if (player.dashTimer > 0) {
+  const dashing = player.dashTimer > 0;
+  const supering = player.superBoost > 0;
+
+  // Dashing OR supering into an un-stunned bot stuns it.
+  // Plain dash also auto-mounts the player on top. A super preserves trajectory.
+  if (dashing || supering) {
     for (const b of bots) {
       if (b.stunTimer > 0) continue;
       if (overlap(player, b)) {
         b.stunTimer = STUN_DURATION;
         b.vx = 0;
-        // auto-mount: snap onto bot's top
-        player.y = b.y - player.h;
-        player.vy = 0;
-        player.vx = 0;
-        player.dashTimer = 0;
-        player.onGround = true;
+        if (dashing) {
+          // auto-mount: snap onto bot's top
+          player.y = b.y - player.h;
+          player.vy = 0;
+          player.vx = 0;
+          player.dashTimer = 0;
+          player.onGround = true;
+        }
         audio.stunHit();
         return;
       }
     }
   }
 
-  // Touching an un-stunned bot (not dashing, not invulnerable) hurts.
+  // Touching an un-stunned bot (not attacking, not invulnerable) hurts.
+  if (dashing || supering) return;
   if (player.invulnTimer > 0) return;
   for (const b of bots) {
     if (b.stunTimer > 0) continue;
@@ -1010,7 +1017,8 @@ function updateProjectiles() {
       projectiles.splice(i, 1);
       continue;
     }
-    if (player.invulnTimer <= 0 && player.dashTimer <= 0 && overlap(player, p)) {
+    const phasing = player.dashTimer > 0 || player.superBoost > 0;
+    if (player.invulnTimer <= 0 && !phasing && overlap(player, p)) {
       hurtPlayer(p);
       projectiles.splice(i, 1);
     }
@@ -1020,19 +1028,26 @@ function updateProjectiles() {
 function handleBossCollision() {
   if (!boss || boss.state === 'defeated') return;
 
-  // Dash hits a vulnerable boss → damage + knockback + boss counter-attacks
-  if (player.dashTimer > 0 && boss.state === 'vulnerable' && overlap(player, boss)) {
-    boss.hp--;
-    // Knock the player back opposite the dash direction. Use superBoost so the
-    // velocity isn't immediately capped to MAX_SPEED.
-    const dir = -player.dashDir;
-    player.vx = 11 * dir;
-    player.vy = -9;
-    player.dashTimer = 0;
-    player.superBoost = SUPER_BOOST_FRAMES;
-    player.invulnTimer = 12; // tiny i-frames just to clear the boss hitbox cleanly
+  // Both regular dash AND a super (the post-dash-cancel boost window) count
+  // as an attacking state for damaging the boss.
+  const attacking = player.dashTimer > 0 || player.superBoost > 0;
 
+  if (attacking && boss.state === 'vulnerable' && overlap(player, boss)) {
+    boss.hp--;
     audio.bossHit();
+
+    if (player.dashTimer > 0) {
+      // Plain dash hit: knock the player back opposite the dash direction.
+      const dir = -player.dashDir;
+      player.vx = 11 * dir;
+      player.vy = -9;
+      player.dashTimer = 0;
+      player.superBoost = SUPER_BOOST_FRAMES;
+    }
+    // For a super hit we don't touch the player's velocity — they keep
+    // soaring along their super trajectory.
+    player.invulnTimer = 12; // tiny i-frames to clear the boss hitbox cleanly
+
     if (boss.hp <= 0) {
       boss.state = 'defeated';
       levelComplete = true;
@@ -1047,8 +1062,9 @@ function handleBossCollision() {
     return;
   }
 
-  // Touching the boss in any non-defeated state hurts (no stun phase anymore)
-  if (player.dashTimer > 0) return;
+  // Touching the boss in any non-defeated state hurts. Dash and super both
+  // phase through (since they are attacks).
+  if (attacking) return;
   if (player.invulnTimer > 0) return;
   if (overlap(player, boss)) {
     hurtPlayer(boss);
