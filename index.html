@@ -140,10 +140,20 @@ const player = {
   dashTimer: 0,
   dashCooldown: 0,
   dashDir: 1,
+  dashFromGround: false,
   superBoost: 0,
   hearts: MAX_HEARTS,
   invulnTimer: 0,
 };
+
+// Konami unlock (↑↑↓↓←→←→ B A Enter) — enables midair super
+const KONAMI_KEY = 'platformer.konami';
+const KONAMI_SEQ = ['ArrowUp','ArrowUp','ArrowDown','ArrowDown','ArrowLeft','ArrowRight','ArrowLeft','ArrowRight','KeyB','KeyA','Enter'];
+let konamiUnlocked = (() => {
+  try { return localStorage.getItem(KONAMI_KEY) === '1'; } catch (e) { return false; }
+})();
+let konamiBuf = [];
+let konamiNotifyTimer = 0;
 
 // Current-level state (filled by loadLevel)
 let platforms = [];
@@ -244,6 +254,23 @@ const floater = (x, y, pMin, pMax, speed = 1.4) => ({
   vx: speed, speed,
   patrolMin: pMin, patrolMax: pMax, stunTimer: 0,
 });
+// Stationary turret. Fires a slow projectile at the player every ~1.5s.
+const sentry = (x, y, shootInterval = 90) => ({
+  type: 'sentry', x, y, w: 30, h: 28,
+  vx: 0, speed: 0,
+  patrolMin: x, patrolMax: x + 30,
+  shootInterval, shootTimer: shootInterval,
+  stunTimer: 0,
+});
+// Walks slowly. When the player is at the same height and within ~250px, it
+// sprints at them.
+const charger = (x, y, pMin, pMax, speed = 1.3) => ({
+  type: 'charger', x, y, w: 30, h: 26,
+  vx: speed, speed, chargeSpeed: 4.2,
+  patrolMin: pMin, patrolMax: pMax,
+  charging: false,
+  stunTimer: 0,
+});
 const flag = (x = 750) => ({ x, y: H - 40 - 60, w: 24, h: 60 });
 const floor = (x = 0, w = W) => ({ x, y: H - 40, w, h: 40 });
 const bossArena = (theme, name, hp, isFinal = false) => ({
@@ -339,7 +366,10 @@ const LEVELS = [
       { x: 400, y: 320, w: 100, h: 18 },
       { x: 600, y: 260, w: 100, h: 18 },
     ],
-    bots: [ sprout(420, 320 - 26, 400, 490) ],
+    bots: [
+      sprout(420, 320 - 26, 400, 490),
+      sentry(630, 260 - 28),
+    ],
     goal: flag(720),
   },
   {
@@ -354,7 +384,8 @@ const LEVELS = [
     ],
     bots: [
       sprout(300, 380 - 26, 280, 370),
-      sprout(490, 320 - 26, 470, 560),
+      sentry(490, 320 - 28),
+      charger(680, H - 40 - 26, 660, 790, 1.4),
     ],
     goal: flag(740),
   },
@@ -383,6 +414,7 @@ const LEVELS = [
     bots: [
       floater(280, 290, 240, 360),
       floater(500, 290, 460, 580, 1.6),
+      charger(720, H - 40 - 26, 700, 790, 1.5),
     ],
     goal: flag(740),
   },
@@ -400,7 +432,7 @@ const LEVELS = [
       { x: 600, y: H - 40, w: 200, h: 40 },
     ],
     bots: [
-      sprout(290, 400 - 26, 280, 360),
+      charger(60, H - 40 - 26, 0, 200, 1.5),
       floater(470, 290, 440, 520),
     ],
     goal: flag(740),
@@ -417,9 +449,9 @@ const LEVELS = [
       { x: 700, y: H - 40, w: 100, h: 40 },
     ],
     bots: [
-      sprout(250, 400 - 26, 240, 320),
+      sentry(260, 400 - 28),
       floater(420, 270, 400, 480, 1.6),
-      sprout(570, 400 - 26, 560, 640),
+      charger(580, 400 - 26, 560, 640, 1.4),
     ],
     goal: flag(750),
   },
@@ -440,6 +472,7 @@ const LEVELS = [
     bots: [
       sprout(180, 400 - 26, 160, 240),
       floater(420, 260, 400, 540, 1.5),
+      sentry(660, 280 - 28),
     ],
     goal: { x: 690, y: 280 - 60, w: 24, h: 60 },
   },
@@ -455,9 +488,9 @@ const LEVELS = [
       { x: 700, y: H - 40, w: 100, h: 40 },
     ],
     bots: [
-      sprout(240, 410 - 26, 220, 300),
+      charger(240, 410 - 26, 220, 300, 1.3),
       floater(440, 260, 380, 540, 1.7),
-      sprout(560, 310 - 26, 540, 620),
+      sentry(560, 310 - 28),
     ],
     goal: flag(750),
   },
@@ -475,9 +508,9 @@ const LEVELS = [
       { x: 620, y: 300, w: 90, h: 18 },
     ],
     bots: [
-      sprout(240, 380 - 26, 220, 310),
+      charger(240, 380 - 26, 220, 310, 1.3),
       sprout(440, 340 - 26, 420, 510),
-      sprout(640, 300 - 26, 620, 710),
+      sentry(640, 300 - 28),
     ],
     goal: flag(720),
   },
@@ -492,8 +525,10 @@ const LEVELS = [
       { x: 640, y: H - 40, w: 160, h: 40 },
     ],
     bots: [
-      floater(300, 290, 240, 460, 1.6),
-      floater(520, 290, 460, 620, 1.8),
+      sentry(250, 390 - 28),
+      floater(380, 260, 320, 500, 1.7),
+      sentry(460, 390 - 28),
+      charger(700, H - 40 - 26, 640, 790, 1.5),
     ],
     goal: flag(740),
   },
@@ -512,9 +547,9 @@ const LEVELS = [
       { x: 680, y: H - 40, w: 120, h: 40 },
     ],
     bots: [
-      sprout(280, 400 - 26, 260, 340),
+      charger(60, H - 40 - 26, 0, 180, 1.4),
       floater(440, 270, 400, 520, 1.7),
-      sprout(560, 400 - 26, 540, 620),
+      charger(560, 400 - 26, 540, 620, 1.3),
     ],
     goal: flag(740),
   },
@@ -531,9 +566,10 @@ const LEVELS = [
       { x: 680, y: H - 40, w: 120, h: 40 },
     ],
     bots: [
-      sprout(330, 320 - 26, 320, 390),
-      sprout(450, 380 - 26, 440, 510),
-      floater(580, 250, 560, 660, 2.0),
+      sentry(340, 320 - 28),
+      charger(450, 380 - 26, 440, 510, 1.4),
+      sentry(580, 320 - 28),
+      floater(620, 250, 580, 670, 2.0),
     ],
     goal: flag(740),
   },
@@ -551,7 +587,7 @@ const LEVELS = [
     bots: [
       floater(260, 300, 220, 360, 1.7),
       floater(460, 250, 420, 560, 1.9),
-      floater(620, 320, 580, 660, 1.6),
+      sentry(720, H - 40 - 28),
     ],
     goal: flag(740),
   },
@@ -565,10 +601,11 @@ const LEVELS = [
       { x: 700, y: H - 40, w: 100, h: 40 },
     ],
     bots: [
-      sprout(245, 390 - 26, 230, 290),
+      sentry(240, 390 - 28),
       floater(360, 320, 320, 420, 1.8),
       floater(500, 260, 460, 580, 2.0),
       floater(620, 320, 580, 680, 1.8),
+      charger(720, H - 40 - 26, 700, 790, 1.5),
     ],
     goal: flag(740),
   },
@@ -587,11 +624,12 @@ const LEVELS = [
       { x: 640, y: H - 40, w: 160, h: 40 },
     ],
     bots: [
-      sprout(240, 400 - 26, 220, 290),
-      floater(400, 270, 360, 460, 1.9),
+      charger(60, H - 40 - 26, 0, 140, 1.5),
+      sentry(380, 350 - 28, 75),
       floater(560, 220, 500, 600, 2.1),
+      sentry(740, H - 40 - 28, 75),
     ],
-    goal: flag(730),
+    goal: flag(700),
   },
   {
     name: 'Cosmic 2',
@@ -606,10 +644,11 @@ const LEVELS = [
       { x: 700, y: H - 40, w: 100, h: 40 },
     ],
     bots: [
-      sprout(355, 320 - 26, 340, 400),
-      sprout(495, 380 - 26, 480, 540),
-      floater(580, 250, 540, 640, 2.0),
+      sentry(210, 380 - 28, 70),
+      charger(490, 380 - 26, 480, 540, 1.5),
+      sentry(630, 320 - 28, 70),
       floater(420, 250, 380, 480, 2.2),
+      charger(720, H - 40 - 26, 700, 790, 1.5),
     ],
     goal: flag(740),
   },
@@ -647,6 +686,17 @@ window.addEventListener('keydown', (e) => {
     }
     if (c === 'BracketLeft' || c === 'Minus') {
       loadLevel(Math.max(0, currentLevel - 1));
+    }
+    // Konami code buffer (only checks fresh key presses)
+    konamiBuf.push(c);
+    if (konamiBuf.length > KONAMI_SEQ.length) konamiBuf.shift();
+    if (!konamiUnlocked
+        && konamiBuf.length === KONAMI_SEQ.length
+        && KONAMI_SEQ.every((k, i) => konamiBuf[i] === k)) {
+      konamiUnlocked = true;
+      try { localStorage.setItem(KONAMI_KEY, '1'); } catch (e) {}
+      konamiNotifyTimer = 240;
+      audio.winLevel();
     }
   }
   keys[c] = true;
@@ -764,8 +814,10 @@ function update() {
   }
 
   if (jumpQueued) {
-    if (dashing) {
-      // SUPER-JUMP: cancel the dash, jump up, keep dash-speed horizontal momentum for a window
+    // Super requires the dash to have started on the ground, UNLESS the player
+    // has unlocked midair super via the Konami code.
+    const superAllowed = dashing && (player.dashFromGround || konamiUnlocked);
+    if (superAllowed) {
       player.dashTimer = 0;
       player.vy = -JUMP_POWER;
       player.vx = DASH_SPEED * player.dashDir;
@@ -786,6 +838,7 @@ function update() {
     player.dashTimer = DASH_DURATION;
     player.dashCooldown = DASH_COOLDOWN;
     player.dashDir = player.facing;
+    player.dashFromGround = player.onGround;
     player.vy = 0;
     audio.dash();
   }
@@ -842,10 +895,50 @@ function updateBots() {
       b.stunTimer--;
       continue;
     }
+
+    if (b.type === 'sentry') {
+      b.shootTimer--;
+      if (b.shootTimer <= 0) {
+        spawnEnemyProjectile(b);
+        b.shootTimer = b.shootInterval;
+      }
+      continue;
+    }
+
+    if (b.type === 'charger') {
+      // Same-floor detection: both feet at the same y means same surface
+      const sameY = Math.abs((player.y + player.h) - (b.y + b.h)) < 5;
+      const dist  = Math.abs((player.x + player.w / 2) - (b.x + b.w / 2));
+      if (sameY && dist < 250) {
+        b.charging = true;
+        b.vx = (player.x > b.x ? 1 : -1) * b.chargeSpeed;
+      } else if (!sameY || dist > 350) {
+        b.charging = false;
+        if (Math.abs(b.vx) > b.speed) b.vx = Math.sign(b.vx) * b.speed || b.speed;
+      }
+      b.x += b.vx;
+      if (b.x < b.patrolMin)       { b.x = b.patrolMin;       b.vx =  Math.abs(b.vx); }
+      if (b.x + b.w > b.patrolMax) { b.x = b.patrolMax - b.w; b.vx = -Math.abs(b.vx); }
+      continue;
+    }
+
+    // sprout / floater: simple horizontal patrol
     b.x += b.vx;
     if (b.x < b.patrolMin)         { b.x = b.patrolMin;          b.vx =  b.speed; }
     if (b.x + b.w > b.patrolMax)   { b.x = b.patrolMax - b.w;    b.vx = -b.speed; }
   }
+}
+
+function spawnEnemyProjectile(b) {
+  const dir = (player.x + player.w / 2) > (b.x + b.w / 2) ? 1 : -1;
+  projectiles.push({
+    x: dir > 0 ? b.x + b.w : b.x - 10,
+    y: b.y + b.h / 2 - 4,
+    w: 10, h: 8,
+    vx: dir * 4.5,
+    enemy: true,
+  });
+  audio.bossShot();
 }
 
 function handleBotCollisions() {
@@ -905,6 +998,7 @@ function respawn() {
   player.vy = 0;
   player.dashTimer = 0;
   player.dashCooldown = 0;
+  player.dashFromGround = false;
   player.superBoost = 0;
   player.hearts = MAX_HEARTS;
   player.invulnTimer = 0;
@@ -1336,6 +1430,112 @@ function drawPlayer() {
 
 const WAKE_WARNING_FRAMES = 75; // last ~1.25s of stun = shake/flash
 
+function drawSentryBot(b) {
+  const stunned = b.stunTimer > 0;
+  const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
+  let shakeX = 0;
+  if (wakingUp) shakeX = (Math.random() - 0.5) * (1 + (1 - b.stunTimer / WAKE_WARNING_FRAMES) * 3);
+  const dx = b.x + shakeX;
+  const dy = b.y;
+
+  // bunker base
+  ctx.fillStyle = stunned ? '#3a8acc' : '#403040';
+  ctx.fillRect(dx, dy + 6, b.w, b.h - 6);
+  ctx.fillStyle = stunned ? '#7ecbff' : '#604060';
+  ctx.fillRect(dx + 2, dy + 8, b.w - 4, 4);
+  // roof
+  ctx.fillStyle = stunned ? '#3a8acc' : '#2a1a2a';
+  ctx.fillRect(dx - 2, dy + 4, b.w + 4, 4);
+  // big eye / barrel tracking player
+  const eyeCx = dx + b.w / 2;
+  const eyeCy = dy + 16;
+  const dir = (player.x + player.w / 2) > eyeCx ? 1 : -1;
+  ctx.fillStyle = '#1a0010';
+  ctx.fillRect(eyeCx - 8, eyeCy - 4, 16, 8);
+  if (!stunned) {
+    // glowing pupil that tracks
+    ctx.fillStyle = '#ff3344';
+    ctx.fillRect(eyeCx - 4 + dir * 3, eyeCy - 3, 6, 6);
+    // wind-up flash before shot (last 12 frames)
+    if (b.shootTimer < 12) {
+      const f = 1 - b.shootTimer / 12;
+      ctx.fillStyle = `rgba(255, 220, 60, ${0.4 + f * 0.5})`;
+      ctx.fillRect(eyeCx - 6 + dir * 4, eyeCy - 4, 4, 8);
+    }
+  } else {
+    ctx.fillStyle = '#222';
+    ctx.fillRect(eyeCx - 7, eyeCy - 1, 14, 2);
+  }
+  if (stunned) drawStunBar(b);
+}
+
+function drawChargerBot(b) {
+  const stunned = b.stunTimer > 0;
+  const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
+  let shakeX = 0;
+  if (wakingUp) shakeX = (Math.random() - 0.5) * (1 + (1 - b.stunTimer / WAKE_WARNING_FRAMES) * 3);
+  const dx = b.x + shakeX;
+  const dy = b.y;
+  const charging = b.charging && !stunned;
+
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fillRect(b.x + 2, b.y + b.h - 2, b.w - 4, 2);
+
+  // motion blur trail when charging
+  if (charging) {
+    ctx.fillStyle = 'rgba(255, 80, 60, 0.3)';
+    const back = b.vx > 0 ? -1 : 1;
+    for (let i = 1; i <= 3; i++) ctx.fillRect(dx + back * i * 6, dy + 6, b.w, b.h - 6);
+  }
+
+  // chassis — red/orange when charging, gray otherwise
+  ctx.fillStyle = stunned ? '#7ecbff' : (charging ? '#cc2810' : '#9a4a3a');
+  ctx.fillRect(dx, dy + 6, b.w, b.h - 6);
+  ctx.fillStyle = stunned ? '#3a8acc' : (charging ? '#8a1a08' : '#5a2a20');
+  ctx.fillRect(dx, dy + b.h - 4, b.w, 4);
+
+  // mohawk spikes on top — angled to direction
+  ctx.fillStyle = stunned ? '#4a7a2a' : '#222';
+  for (let i = 0; i < 5; i++) {
+    const sx = dx + 4 + i * 5;
+    ctx.fillRect(sx, dy + 1, 3, 6);
+  }
+
+  // eyes
+  const facingRight = b.vx >= 0;
+  if (stunned) {
+    ctx.fillStyle = '#222';
+    ctx.fillRect(dx + 6,  dy + 14, 5, 2);
+    ctx.fillRect(dx + 18, dy + 14, 5, 2);
+  } else {
+    ctx.fillStyle = charging ? '#ffee44' : '#ff3344';
+    const eyeY = dy + 12;
+    if (facingRight) {
+      ctx.fillRect(dx + b.w - 13, eyeY, 4, 5);
+      ctx.fillRect(dx + b.w - 6,  eyeY, 4, 5);
+    } else {
+      ctx.fillRect(dx + 2, eyeY, 4, 5);
+      ctx.fillRect(dx + 9, eyeY, 4, 5);
+    }
+  }
+
+  if (stunned) drawStunBar(b);
+}
+
+function drawStunBar(b) {
+  const wakingUp = b.stunTimer <= WAKE_WARNING_FRAMES;
+  const pct = b.stunTimer / STUN_DURATION;
+  const r = Math.floor(255 - 135 * pct);
+  const g = Math.floor( 80 + 120 * pct);
+  const bl = Math.floor( 80 + 175 * pct);
+  const barY = wakingUp ? b.y - 22 : b.y - 7;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(b.x, barY, b.w, 4);
+  ctx.fillStyle = `rgb(${r}, ${g}, ${bl})`;
+  ctx.fillRect(b.x, barY, b.w * pct, 4);
+}
+
 function drawFloaterBot(b) {
   const stunned = b.stunTimer > 0;
   const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
@@ -1458,10 +1658,9 @@ function drawFloaterBot(b) {
 }
 
 function drawBot(b) {
-  if (b.type === 'floater') {
-    drawFloaterBot(b);
-    return;
-  }
+  if (b.type === 'floater') { drawFloaterBot(b); return; }
+  if (b.type === 'sentry')  { drawSentryBot(b);  return; }
+  if (b.type === 'charger') { drawChargerBot(b); return; }
   const stunned = b.stunTimer > 0;
   const wakingUp = stunned && b.stunTimer <= WAKE_WARNING_FRAMES;
 
@@ -1595,6 +1794,23 @@ function drawHUD() {
     ctx.fillText('🔇 muted (M)', W - 14, 46);
     ctx.textAlign = 'left';
   }
+}
+
+function drawKonamiNotif() {
+  if (konamiNotifyTimer <= 0) return;
+  konamiNotifyTimer--;
+  const alpha = Math.min(1, konamiNotifyTimer / 40);
+  const y = 110;
+  ctx.fillStyle = `rgba(20, 10, 40, ${0.75 * alpha})`;
+  ctx.fillRect(W / 2 - 200, y, 400, 56);
+  ctx.fillStyle = `rgba(255, 215, 60, ${alpha})`;
+  ctx.font = '800 22px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('★ MIDAIR SUPER UNLOCKED ★', W / 2, y + 26);
+  ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alpha})`;
+  ctx.font = '500 12px -apple-system, sans-serif';
+  ctx.fillText('you can now super even from a midair dash', W / 2, y + 46);
+  ctx.textAlign = 'left';
 }
 
 // Baba-style rule images
@@ -1770,15 +1986,25 @@ function drawBoss() {
 
 function drawProjectiles() {
   for (const p of projectiles) {
-    // glow trail
-    ctx.fillStyle = 'rgba(255, 120, 60, 0.4)';
-    const tx = p.vx > 0 ? p.x - 8 : p.x + p.w;
-    ctx.fillRect(tx, p.y + 1, 8, p.h - 2);
-    // body
-    ctx.fillStyle = '#ff4422';
-    ctx.fillRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = '#ffaa66';
-    ctx.fillRect(p.x, p.y + 2, p.w, 2);
+    if (p.enemy) {
+      // smaller, orange-yellow turret bolt
+      ctx.fillStyle = 'rgba(255, 200, 60, 0.4)';
+      const tx = p.vx > 0 ? p.x - 5 : p.x + p.w;
+      ctx.fillRect(tx, p.y + 1, 5, p.h - 2);
+      ctx.fillStyle = '#ffaa22';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ffee88';
+      ctx.fillRect(p.x, p.y + 1, p.w, 2);
+    } else {
+      // boss projectile — bigger red bolt
+      ctx.fillStyle = 'rgba(255, 120, 60, 0.4)';
+      const tx = p.vx > 0 ? p.x - 8 : p.x + p.w;
+      ctx.fillRect(tx, p.y + 1, 8, p.h - 2);
+      ctx.fillStyle = '#ff4422';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ffaa66';
+      ctx.fillRect(p.x, p.y + 2, p.w, 2);
+    }
   }
 }
 
@@ -1829,6 +2055,7 @@ function draw() {
   drawProjectiles();
   drawPlayer();
   drawHUD();
+  drawKonamiNotif();
   if (levelComplete) drawLevelComplete();
 }
 
