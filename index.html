@@ -93,7 +93,7 @@
 </style>
 </head>
 <body>
-<div id="info">walk: <b>A / D</b> or <b>← →</b> &nbsp;·&nbsp; jump: <b>W</b>, <b>Space</b>, or <b>↑</b> &nbsp;·&nbsp; dash: <b>J</b> or <b>Shift</b> &nbsp;·&nbsp; restart: <b>R</b> &nbsp;·&nbsp; mute: <b>M</b> &nbsp;·&nbsp; level: <b>1–9</b>, <b>0</b>=10, <b>[</b>/<b>]</b>=prev/next</div>
+<div id="info">walk: <b>A / D</b> or <b>← →</b> &nbsp;·&nbsp; jump: <b>W</b>, <b>Space</b>, or <b>↑</b> &nbsp;·&nbsp; dash: <b>J</b> or <b>Shift</b> &nbsp;·&nbsp; pause: <b>Esc</b> or <b>P</b> &nbsp;·&nbsp; mute: <b>M</b> &nbsp;·&nbsp; restart: <b>R</b></div>
 <div id="game-wrap">
   <canvas id="game" width="800" height="500"></canvas>
   <div class="touch-pad touch-pad-left">
@@ -176,6 +176,20 @@ let levelName = '';
 let currentLevel = 0;
 let levelComplete = false;
 let levelCompleteTimer = 0;
+
+// Top-level screen the player is on. Transitions:
+//   menu ⇄ levelSelect, menu → playing, playing ⇄ paused, paused → menu/levelSelect
+let gameState = 'menu';
+let menuCursor = 0;
+let pauseCursor = 0;
+let selectCursor = 0;   // 0..LEVELS.length-1
+let mouseX = 0, mouseY = 0;
+let clickQueued = false;
+
+// Per-frame list of {x, y, w, h, action, label?, hoverIndex?} for the current
+// screen. Re-built each frame in the screen's draw call; consumed by the click
+// handler at the start of the next tick.
+let clickables = [];
 
 // ─────────── Audio (synthesized via Web Audio API; no files) ───────────
 const MUTE_KEY = 'platformer.muted';
@@ -669,25 +683,8 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
   }
   if (!keys[c]) {
-    if (c === 'KeyW' || c === 'Space' || c === 'ArrowUp') jumpQueued = true;
-    if (c === 'KeyJ' || c === 'ShiftLeft' || c === 'ShiftRight') dashQueued = true;
-    if (c === 'Space' || c === 'Enter') advanceQueued = true;
-    if (c === 'KeyR') loadLevel(currentLevel);
+    // Globally available — mute + Konami work on every screen
     if (c === 'KeyM') toggleMute();
-    // Dev: Digit1-9 jumps to that level, Digit0 → level 10
-    if (c.startsWith('Digit') && c !== 'Digit0') {
-      const idx = parseInt(c.slice(5), 10) - 1;
-      if (idx < LEVELS.length) loadLevel(idx);
-    }
-    if (c === 'Digit0' && 9 < LEVELS.length) loadLevel(9);
-    // Dev: [ ] (or - =) step through any level
-    if (c === 'BracketRight' || c === 'Equal') {
-      loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
-    }
-    if (c === 'BracketLeft' || c === 'Minus') {
-      loadLevel(Math.max(0, currentLevel - 1));
-    }
-    // Konami code buffer (only checks fresh key presses)
     konamiBuf.push(c);
     if (konamiBuf.length > KONAMI_SEQ.length) konamiBuf.shift();
     if (!konamiUnlocked
@@ -698,10 +695,245 @@ window.addEventListener('keydown', (e) => {
       konamiNotifyTimer = 240;
       audio.winLevel();
     }
+
+    if (gameState === 'playing') {
+      if (c === 'KeyW' || c === 'Space' || c === 'ArrowUp') jumpQueued = true;
+      if (c === 'KeyJ' || c === 'ShiftLeft' || c === 'ShiftRight') dashQueued = true;
+      if (c === 'Space' || c === 'Enter') advanceQueued = true;
+      if (c === 'KeyR') loadLevel(currentLevel);
+      if (c === 'Escape' || c === 'KeyP') { gameState = 'paused'; pauseCursor = 0; }
+      // Dev shortcuts still work in-game
+      if (c.startsWith('Digit') && c !== 'Digit0') {
+        const idx = parseInt(c.slice(5), 10) - 1;
+        if (idx < LEVELS.length) loadLevel(idx);
+      }
+      if (c === 'Digit0' && 9 < LEVELS.length) loadLevel(9);
+      if (c === 'BracketRight' || c === 'Equal')
+        loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
+      if (c === 'BracketLeft' || c === 'Minus')
+        loadLevel(Math.max(0, currentLevel - 1));
+    } else if (gameState === 'paused') {
+      if (c === 'Escape' || c === 'KeyP') gameState = 'playing';
+      if (c === 'ArrowUp')   pauseCursor = (pauseCursor + PAUSE_OPTIONS.length - 1) % PAUSE_OPTIONS.length;
+      if (c === 'ArrowDown') pauseCursor = (pauseCursor + 1) % PAUSE_OPTIONS.length;
+      if (c === 'Enter' || c === 'Space') PAUSE_OPTIONS[pauseCursor].action();
+    } else if (gameState === 'menu') {
+      if (c === 'ArrowUp')   menuCursor = (menuCursor + MENU_OPTIONS.length - 1) % MENU_OPTIONS.length;
+      if (c === 'ArrowDown') menuCursor = (menuCursor + 1) % MENU_OPTIONS.length;
+      if (c === 'Enter' || c === 'Space') MENU_OPTIONS[menuCursor].action();
+    } else if (gameState === 'levelSelect') {
+      if (c === 'Escape') gameState = 'menu';
+      if (c === 'ArrowLeft')  selectCursor = Math.max(0, selectCursor - 1);
+      if (c === 'ArrowRight') selectCursor = Math.min(LEVELS.length - 1, selectCursor + 1);
+      if (c === 'ArrowUp')    selectCursor = Math.max(0, selectCursor - LEVEL_SELECT_COLS);
+      if (c === 'ArrowDown')  selectCursor = Math.min(LEVELS.length - 1, selectCursor + LEVEL_SELECT_COLS);
+      if (c === 'Enter' || c === 'Space') { loadLevel(selectCursor); gameState = 'playing'; }
+    }
   }
   keys[c] = true;
 });
 window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+// Canvas mouse / touch — translate page coords into the 800x500 canvas space
+function canvasPoint(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (canvas.width  / rect.width),
+    y: (clientY - rect.top)  * (canvas.height / rect.height),
+  };
+}
+canvas.addEventListener('mousemove', (e) => {
+  const p = canvasPoint(e.clientX, e.clientY);
+  mouseX = p.x; mouseY = p.y;
+});
+canvas.addEventListener('mousedown', (e) => {
+  if (gameState === 'playing') return; // game uses keyboard/touch buttons
+  const p = canvasPoint(e.clientX, e.clientY);
+  mouseX = p.x; mouseY = p.y;
+  clickQueued = true;
+});
+canvas.addEventListener('touchstart', (e) => {
+  if (gameState === 'playing') return;
+  const t = e.touches[0]; if (!t) return;
+  const p = canvasPoint(t.clientX, t.clientY);
+  mouseX = p.x; mouseY = p.y;
+  clickQueued = true;
+  e.preventDefault();
+}, { passive: false });
+
+const LEVEL_SELECT_COLS = 5;
+const LEVEL_SELECT_ROWS = 6;
+
+const MENU_OPTIONS = [
+  { label: 'PLAY',         action: () => { loadLevel(loadSavedLevel()); gameState = 'playing'; } },
+  { label: 'LEVEL SELECT', action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
+  { label: 'MUTE: ON',     dyn: () => 'MUTE: ' + (muted ? 'OFF' : 'ON'),
+                            action: () => { toggleMute(); } },
+];
+
+const PAUSE_OPTIONS = [
+  { label: 'RESUME',        action: () => { gameState = 'playing'; } },
+  { label: 'RESTART LEVEL', action: () => { loadLevel(currentLevel); gameState = 'playing'; } },
+  { label: 'LEVEL SELECT',  action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
+  { label: 'MAIN MENU',     action: () => { gameState = 'menu'; menuCursor = 0; } },
+  { label: 'MUTE: ON',      dyn: () => 'MUTE: ' + (muted ? 'OFF' : 'ON'),
+                             action: () => { toggleMute(); } },
+];
+
+// Process any pending click: walk the clickables registered by the most recent
+// screen draw and fire the first match.
+function consumeClick() {
+  if (!clickQueued) return;
+  clickQueued = false;
+  for (const c of clickables) {
+    if (mouseX >= c.x && mouseX <= c.x + c.w &&
+        mouseY >= c.y && mouseY <= c.y + c.h) {
+      c.action();
+      return;
+    }
+  }
+}
+
+// Generic vertical menu rendering (used by main menu + pause)
+function drawVerticalMenu(title, options, cursor, setCursor, subtitle) {
+  clickables = [];
+  // Dim background
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '800 44px -apple-system, sans-serif';
+  ctx.fillText(title, W / 2, 110);
+
+  if (subtitle) {
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.font = '500 14px -apple-system, sans-serif';
+    ctx.fillText(subtitle, W / 2, 138);
+  }
+
+  const btnW = 280, btnH = 44, gap = 12;
+  const startY = 180;
+  for (let i = 0; i < options.length; i++) {
+    const x = (W - btnW) / 2;
+    const y = startY + i * (btnH + gap);
+    const hovered = mouseX >= x && mouseX <= x + btnW && mouseY >= y && mouseY <= y + btnH;
+    if (hovered) setCursor(i);
+    const selected = i === cursor;
+    // Button bg
+    ctx.fillStyle = selected ? 'rgba(255, 221, 51, 0.25)' : 'rgba(255, 255, 255, 0.08)';
+    ctx.fillRect(x, y, btnW, btnH);
+    // Border
+    ctx.fillStyle = selected ? '#ffdd33' : 'rgba(255,255,255,0.35)';
+    ctx.fillRect(x, y, btnW, 2);
+    ctx.fillRect(x, y + btnH - 2, btnW, 2);
+    ctx.fillRect(x, y, 2, btnH);
+    ctx.fillRect(x + btnW - 2, y, 2, btnH);
+    // Label
+    ctx.fillStyle = selected ? '#ffdd33' : '#fff';
+    ctx.font = '700 18px -apple-system, sans-serif';
+    const label = options[i].dyn ? options[i].dyn() : options[i].label;
+    ctx.fillText(label, W / 2, y + btnH / 2 + 6);
+
+    clickables.push({ x, y, w: btnW, h: btnH, action: options[i].action });
+  }
+
+  // Hint footer
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font = '500 12px -apple-system, sans-serif';
+  ctx.fillText('↑ ↓ to move · Enter to select · click also works', W / 2, H - 22);
+  ctx.textAlign = 'left';
+}
+
+function drawMainMenu() {
+  // Background — a gentle starfield so it's not pure black
+  ctx.fillStyle = '#0e0b22';
+  ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 60; i++) {
+    const sx = (i * 137 + 23) % W;
+    const sy = (i * 211 + 17) % H;
+    const tw = (performance.now() / 500 + i * 0.3);
+    const a = 0.3 + 0.5 * ((Math.sin(tw) + 1) / 2);
+    ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  drawVerticalMenu('PLATFORMER', MENU_OPTIONS, menuCursor, (i) => menuCursor = i,
+    'dash · stun · ride');
+}
+
+function drawPauseMenu() {
+  // Draw the underlying game frame first, dimmed
+  drawGameFrame();
+  drawVerticalMenu('PAUSED', PAUSE_OPTIONS, pauseCursor, (i) => pauseCursor = i,
+    levelName);
+}
+
+function drawLevelSelect() {
+  // Background — themed to currently selected level
+  const lv = LEVELS[selectCursor];
+  const savedTheme = currentTheme;
+  currentTheme = lv.theme || 'field';
+  drawSky();
+  currentTheme = savedTheme;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(0, 0, W, H);
+
+  clickables = [];
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '800 32px -apple-system, sans-serif';
+  ctx.fillText('LEVEL SELECT', W / 2, 50);
+
+  // Grid
+  const cellW = 80, cellH = 50, gapX = 12, gapY = 12;
+  const gridW = LEVEL_SELECT_COLS * cellW + (LEVEL_SELECT_COLS - 1) * gapX;
+  const gridH = LEVEL_SELECT_ROWS * cellH + (LEVEL_SELECT_ROWS - 1) * gapY;
+  const startX = (W - gridW) / 2;
+  const startY = 78;
+
+  for (let i = 0; i < LEVELS.length; i++) {
+    const row = Math.floor(i / LEVEL_SELECT_COLS);
+    const col = i % LEVEL_SELECT_COLS;
+    const x = startX + col * (cellW + gapX);
+    const y = startY + row * (cellH + gapY);
+    const lvi = LEVELS[i];
+    const isBoss = !!lvi.boss;
+    const hovered = mouseX >= x && mouseX <= x + cellW && mouseY >= y && mouseY <= y + cellH;
+    if (hovered) selectCursor = i;
+    const selected = i === selectCursor;
+
+    ctx.fillStyle = selected ? 'rgba(255, 221, 51, 0.25)'
+                  : isBoss ? 'rgba(180, 40, 40, 0.30)'
+                  : 'rgba(255, 255, 255, 0.10)';
+    ctx.fillRect(x, y, cellW, cellH);
+    ctx.fillStyle = selected ? '#ffdd33'
+                   : isBoss  ? '#ff6644'
+                   : 'rgba(255,255,255,0.45)';
+    ctx.fillRect(x, y, cellW, 2);
+    ctx.fillRect(x, y + cellH - 2, cellW, 2);
+    ctx.fillRect(x, y, 2, cellH);
+    ctx.fillRect(x + cellW - 2, y, 2, cellH);
+    // Number
+    ctx.fillStyle = selected ? '#ffdd33' : '#fff';
+    ctx.font = '800 18px -apple-system, sans-serif';
+    ctx.fillText(String(i + 1), x + cellW / 2, y + 22);
+    // Name (smaller)
+    ctx.font = '600 10px -apple-system, sans-serif';
+    ctx.fillStyle = selected ? '#ffdd33' : 'rgba(255,255,255,0.7)';
+    ctx.fillText(lvi.name, x + cellW / 2, y + 38);
+
+    clickables.push({
+      x, y, w: cellW, h: cellH,
+      action: () => { selectCursor = i; loadLevel(i); gameState = 'playing'; },
+    });
+  }
+
+  // Footer info
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '500 12px -apple-system, sans-serif';
+  ctx.fillText('arrows + Enter · or click a level · Esc to return', W / 2, H - 18);
+  ctx.textAlign = 'left';
+}
 
 // Touch / mouse controls for mobile
 function bindTouchButton(id, onPress, onRelease) {
@@ -2045,7 +2277,7 @@ function drawHeart(x, y, filled) {
   }
 }
 
-function draw() {
+function drawGameFrame() {
   drawSky();
   drawBabaRule();
   for (const p of platforms) drawPlatform(p);
@@ -2059,13 +2291,30 @@ function draw() {
   if (levelComplete) drawLevelComplete();
 }
 
+function syncInfoBar() {
+  const info = document.getElementById('info');
+  if (info) info.style.display = (gameState === 'playing') ? '' : 'none';
+}
+
 function loop() {
-  update();
-  draw();
+  consumeClick();
+  syncInfoBar();
+  if (gameState === 'playing') {
+    update();
+    drawGameFrame();
+  } else if (gameState === 'paused') {
+    drawPauseMenu();
+  } else if (gameState === 'menu') {
+    drawMainMenu();
+  } else if (gameState === 'levelSelect') {
+    drawLevelSelect();
+  }
   requestAnimationFrame(loop);
 }
 
+// Pre-load the saved level so PLAY from menu is instant, but stay on menu first.
 loadLevel(loadSavedLevel());
+gameState = 'menu';
 loop();
 </script>
 </body>
