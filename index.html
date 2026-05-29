@@ -767,7 +767,7 @@ const LEVEL_SELECT_ROWS = 6;
 const MENU_OPTIONS = [
   { label: 'PLAY',         action: () => { loadLevel(loadSavedLevel()); gameState = 'playing'; } },
   { label: 'LEVEL SELECT', action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
-  { label: 'MUTE: ON',     dyn: () => 'MUTE: ' + (muted ? 'OFF' : 'ON'),
+  { label: 'MUTE: OFF',    dyn: () => 'MUTE: ' + (muted ? 'ON' : 'OFF'),
                             action: () => { toggleMute(); } },
 ];
 
