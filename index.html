@@ -292,8 +292,11 @@ const bossArena = (theme, name, hp, isFinal = false) => ({
   spawn: { x: 50, y: 380 },
   platforms: [
     floor(),
-    { x: 80,  y: 320, w: 120, h: 18 },
-    { x: 600, y: 320, w: 120, h: 18 },
+    // Side platforms — y=350 keeps them reachable with a regular ground jump
+    // (max apex is ~130px above the floor) so you don't need a midair super
+    // to use them for cover.
+    { x: 80,  y: 350, w: 120, h: 18 },
+    { x: 600, y: 350, w: 120, h: 18 },
   ],
   bots: [],
   boss: {
