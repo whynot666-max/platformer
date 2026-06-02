@@ -1079,12 +1079,15 @@ function update() {
       player.onGround = false;
       audio.super();
     } else if (tailOfSuper || lateSuper) {
-      // Chain / coyote super — also refund a midair dash so you can keep chaining
+      // Chain / coyote super — also refund a midair dash + clear cooldown so
+      // the next dash fires immediately instead of being blocked by leftover
+      // cooldown from the original ground dash.
       player.vy = -JUMP_POWER;
       player.vx = DASH_SPEED * player.dashDir;
       player.superBoost = SUPER_BOOST_FRAMES;
       player.lateSuperTimer = 0;
       player.dashAvailable = true;
+      player.dashCooldown = 0;
       player.onGround = false;
       audio.super();
     } else if (player.onGround) {
