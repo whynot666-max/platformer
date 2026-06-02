@@ -1308,18 +1308,19 @@ function respawn() {
   }
 }
 
-// Death uses up a life. With lives left, you respawn at the world's first
-// level. Out of lives, you hit GAME OVER and return to the main menu.
+// Death uses up a life. With lives left, you respawn at the SAME level you
+// died on. When you run out of lives, the whole world restarts at its first
+// level and your life counter refills.
 function die() {
   audio.die();
   livesLeft--;
   if (livesLeft <= 0) {
-    gameState = 'gameOver';
-    gameOverTimer = 150; // ~2.5s of GAME OVER screen before bouncing to menu
-    return;
+    livesLeft = LIVES_PER_WORLD;
+    const worldFirst = Math.floor(currentLevel / 3) * 3;
+    loadLevel(worldFirst);
+  } else {
+    loadLevel(currentLevel);
   }
-  const worldFirst = Math.floor(currentLevel / 3) * 3;
-  loadLevel(worldFirst);
 }
 
 function getSolids() {
