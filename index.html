@@ -141,19 +141,28 @@ const player = {
   dashCooldown: 0,
   dashDir: 1,
   dashFromGround: false,
+  dashAvailable: true,    // refunded on ground touch (or always true if konami unlocked)
   superBoost: 0,
+  lateSuperTimer: 0,      // coyote window after a super ends — jump here = another super
   hearts: MAX_HEARTS,
   invulnTimer: 0,
 };
 
 // Konami unlock (↑↑↓↓←→←→ B A Enter) — enables midair super
+// Reverse sequence locks it back down
 const KONAMI_KEY = 'platformer.konami';
 const KONAMI_SEQ = ['ArrowUp','ArrowUp','ArrowDown','ArrowDown','ArrowLeft','ArrowRight','ArrowLeft','ArrowRight','KeyB','KeyA','Enter'];
+const KONAMI_REV_SEQ = [...KONAMI_SEQ].reverse();
 let konamiUnlocked = (() => {
   try { return localStorage.getItem(KONAMI_KEY) === '1'; } catch (e) { return false; }
 })();
 let konamiBuf = [];
 let konamiNotifyTimer = 0;
+let konamiLockNotifyTimer = 0;
+
+// Frames after a super ends in which a fresh jump press still triggers a super
+// and refunds a midair dash. Lets you chain supers with a tight input.
+const LATE_SUPER_FRAMES = 6;
 
 // Current-level state (filled by loadLevel)
 let platforms = [];
@@ -690,13 +699,18 @@ window.addEventListener('keydown', (e) => {
     if (c === 'KeyM') toggleMute();
     konamiBuf.push(c);
     if (konamiBuf.length > KONAMI_SEQ.length) konamiBuf.shift();
-    if (!konamiUnlocked
-        && konamiBuf.length === KONAMI_SEQ.length
-        && KONAMI_SEQ.every((k, i) => konamiBuf[i] === k)) {
-      konamiUnlocked = true;
-      try { localStorage.setItem(KONAMI_KEY, '1'); } catch (e) {}
-      konamiNotifyTimer = 240;
-      audio.winLevel();
+    if (konamiBuf.length === KONAMI_SEQ.length) {
+      if (!konamiUnlocked && KONAMI_SEQ.every((k, i) => konamiBuf[i] === k)) {
+        konamiUnlocked = true;
+        try { localStorage.setItem(KONAMI_KEY, '1'); } catch (e) {}
+        konamiNotifyTimer = 240;
+        audio.winLevel();
+      } else if (konamiUnlocked && KONAMI_REV_SEQ.every((k, i) => konamiBuf[i] === k)) {
+        konamiUnlocked = false;
+        try { localStorage.setItem(KONAMI_KEY, '0'); } catch (e) {}
+        konamiLockNotifyTimer = 240;
+        audio.die();
+      }
     }
 
     if (gameState === 'playing') {
@@ -1049,14 +1063,28 @@ function update() {
   }
 
   if (jumpQueued) {
-    // Super requires the dash to have started on the ground, UNLESS the player
-    // has unlocked midair super via the Konami code.
+    // Super conditions, in priority order:
+    //   1. Mid-dash + (dash started on ground OR konami unlocked) → standard super
+    //   2. Inside a super already, near its tail → chain another super
+    //   3. Just finished a super, within the late-super coyote window → still super
     const superAllowed = dashing && (player.dashFromGround || konamiUnlocked);
+    const tailOfSuper  = player.superBoost > 0 && player.superBoost <= LATE_SUPER_FRAMES;
+    const lateSuper    = player.lateSuperTimer > 0;
+
     if (superAllowed) {
       player.dashTimer = 0;
       player.vy = -JUMP_POWER;
       player.vx = DASH_SPEED * player.dashDir;
       player.superBoost = SUPER_BOOST_FRAMES;
+      player.onGround = false;
+      audio.super();
+    } else if (tailOfSuper || lateSuper) {
+      // Chain / coyote super — also refund a midair dash so you can keep chaining
+      player.vy = -JUMP_POWER;
+      player.vx = DASH_SPEED * player.dashDir;
+      player.superBoost = SUPER_BOOST_FRAMES;
+      player.lateSuperTimer = 0;
+      player.dashAvailable = true;
       player.onGround = false;
       audio.super();
     } else if (player.onGround) {
@@ -1067,13 +1095,23 @@ function update() {
   }
   jumpQueued = false;
 
-  if (player.superBoost > 0) player.superBoost--;
+  // Super tick — open the late-super coyote window the moment the super ends
+  if (player.superBoost > 0) {
+    player.superBoost--;
+    if (player.superBoost === 0) player.lateSuperTimer = LATE_SUPER_FRAMES;
+  } else if (player.lateSuperTimer > 0) {
+    player.lateSuperTimer--;
+  }
 
-  if (dashQueued && player.dashCooldown <= 0) {
+  // Dash gate: cooldown is the time limiter; ground-touch is the count limiter
+  // (one dash per landing). Konami unlock removes the ground-touch gate.
+  const dashGateOk = player.dashCooldown <= 0 && (konamiUnlocked || player.dashAvailable);
+  if (dashQueued && dashGateOk) {
     player.dashTimer = DASH_DURATION;
     player.dashCooldown = DASH_COOLDOWN;
     player.dashDir = player.facing;
     player.dashFromGround = player.onGround;
+    player.dashAvailable = false; // consumed until next ground touch
     player.vy = 0;
     audio.dash();
   }
@@ -1088,11 +1126,16 @@ function update() {
   }
   if (player.dashCooldown > 0) player.dashCooldown--;
 
+  const wasOnGround = player.onGround;
   player.x += player.vx;
   resolveX();
   player.y += player.vy;
   player.onGround = false;
   resolveY();
+  // Refund the dash on landing: one dash per ground touch
+  if (!wasOnGround && player.onGround) {
+    player.dashAvailable = true;
+  }
 
   if (player.x < 0) { player.x = 0; player.vx = 0; }
   if (player.x + player.w > W) { player.x = W - player.w; player.vx = 0; }
@@ -1195,6 +1238,7 @@ function handleBotCollisions() {
           player.vx = 0;
           player.dashTimer = 0;
           player.onGround = true;
+          player.dashAvailable = true; // landing on a stunned bot counts as ground touch
         }
         audio.stunHit();
         return;
@@ -1234,6 +1278,8 @@ function respawn() {
   player.dashTimer = 0;
   player.dashCooldown = 0;
   player.dashFromGround = false;
+  player.dashAvailable = true;
+  player.lateSuperTimer = 0;
   player.superBoost = 0;
   player.hearts = MAX_HEARTS;
   player.invulnTimer = 0;
@@ -2032,20 +2078,36 @@ function drawHUD() {
 }
 
 function drawKonamiNotif() {
-  if (konamiNotifyTimer <= 0) return;
-  konamiNotifyTimer--;
-  const alpha = Math.min(1, konamiNotifyTimer / 40);
-  const y = 110;
-  ctx.fillStyle = `rgba(20, 10, 40, ${0.75 * alpha})`;
-  ctx.fillRect(W / 2 - 200, y, 400, 56);
-  ctx.fillStyle = `rgba(255, 215, 60, ${alpha})`;
-  ctx.font = '800 22px -apple-system, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('★ MIDAIR SUPER UNLOCKED ★', W / 2, y + 26);
-  ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alpha})`;
-  ctx.font = '500 12px -apple-system, sans-serif';
-  ctx.fillText('you can now super even from a midair dash', W / 2, y + 46);
-  ctx.textAlign = 'left';
+  if (konamiNotifyTimer > 0) {
+    konamiNotifyTimer--;
+    const alpha = Math.min(1, konamiNotifyTimer / 40);
+    const y = 110;
+    ctx.fillStyle = `rgba(20, 10, 40, ${0.75 * alpha})`;
+    ctx.fillRect(W / 2 - 200, y, 400, 56);
+    ctx.fillStyle = `rgba(255, 215, 60, ${alpha})`;
+    ctx.font = '800 22px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('★ MIDAIR SUPER UNLOCKED ★', W / 2, y + 26);
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alpha})`;
+    ctx.font = '500 12px -apple-system, sans-serif';
+    ctx.fillText('you can now super even from a midair dash', W / 2, y + 46);
+    ctx.textAlign = 'left';
+  }
+  if (konamiLockNotifyTimer > 0) {
+    konamiLockNotifyTimer--;
+    const alpha = Math.min(1, konamiLockNotifyTimer / 40);
+    const y = 110;
+    ctx.fillStyle = `rgba(40, 10, 20, ${0.75 * alpha})`;
+    ctx.fillRect(W / 2 - 200, y, 400, 56);
+    ctx.fillStyle = `rgba(255, 80, 80, ${alpha})`;
+    ctx.font = '800 22px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('★ DEKCOLNU REPUS RIADIM ★', W / 2, y + 26);
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * alpha})`;
+    ctx.font = '500 12px -apple-system, sans-serif';
+    ctx.fillText('hsad riadim a morf neve repus won nac uoy', W / 2, y + 46);
+    ctx.textAlign = 'left';
+  }
 }
 
 // Baba-style rule images
