@@ -189,10 +189,52 @@ let levelCompleteTimer = 0;
 // Top-level screen the player is on. Transitions:
 //   menu ⇄ levelSelect, menu → playing, playing ⇄ paused, paused → menu/levelSelect
 //   playing → gameOver → menu (when out of lives)
+//   menu ⇄ timeTrialMenu, timeTrialMenu → trialLevelSelect → playing
+//   playing → trialResults → menu
 let gameState = 'menu';
 const LIVES_PER_WORLD = 3;
 let livesLeft = LIVES_PER_WORLD;
 let gameOverTimer = 0;
+
+// ─────────── Time Trial state ───────────
+const FRAME_MS = 1000 / 60;
+const TT_KEYS = {
+  levelPbs: 'platformer.trial.levelPbs',
+  rangePbs: 'platformer.trial.rangePbs',
+  fullPb:   'platformer.trial.fullPb',
+};
+
+function loadJson(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch (e) { return fallback; }
+}
+function saveJson(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+}
+
+function loadLevelPbs() {
+  const arr = loadJson(TT_KEYS.levelPbs, null);
+  if (Array.isArray(arr) && arr.length >= 30) return arr.slice(0, 30);
+  return new Array(30).fill(null);
+}
+function loadRangePbs()    { return loadJson(TT_KEYS.rangePbs, {}); }
+function loadFullPb()      { return loadJson(TT_KEYS.fullPb, null); }
+
+let levelPbs  = loadLevelPbs();
+let rangePbs  = loadRangePbs();
+let fullPb    = loadFullPb();
+
+// Active trial state. null when no trial in progress.
+//   type:    'single' | 'range' | 'full'
+//   startIdx, endIdx (inclusive)
+//   elapsedMs, splits[], deaths
+//   finished, dnf, newBest
+let timeTrial = null;
+
+let trialMenuCursor = 0;
+let trialSelectMode = 'single'; // 'single' | 'rangeStart' | 'rangeEnd'
+let rangePickStart  = null;
+let trialResultsCursor = 0;
 let menuCursor = 0;
 let pauseCursor = 0;
 let selectCursor = 0;   // 0..LEVELS.length-1
@@ -721,18 +763,28 @@ window.addEventListener('keydown', (e) => {
       if (c === 'KeyW' || c === 'Space' || c === 'ArrowUp') jumpQueued = true;
       if (c === 'KeyJ' || c === 'ShiftLeft' || c === 'ShiftRight') dashQueued = true;
       if (c === 'Space' || c === 'Enter') advanceQueued = true;
-      if (c === 'KeyR') loadLevel(currentLevel);
-      if (c === 'Escape' || c === 'KeyP') { gameState = 'paused'; pauseCursor = 0; }
-      // Dev shortcuts still work in-game
-      if (c.startsWith('Digit') && c !== 'Digit0') {
-        const idx = parseInt(c.slice(5), 10) - 1;
-        if (idx < LEVELS.length) loadLevel(idx);
+      if (c === 'KeyR') {
+        // During a trial, R restarts the entire trial from its start.
+        if (timeTrial) {
+          const { type, startIdx, endIdx } = timeTrial;
+          startTrial(type, startIdx, endIdx);
+        } else {
+          loadLevel(currentLevel);
+        }
       }
-      if (c === 'Digit0' && 9 < LEVELS.length) loadLevel(9);
-      if (c === 'BracketRight' || c === 'Equal')
-        loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
-      if (c === 'BracketLeft' || c === 'Minus')
-        loadLevel(Math.max(0, currentLevel - 1));
+      if (c === 'Escape' || c === 'KeyP') { gameState = 'paused'; pauseCursor = 0; }
+      // Dev shortcuts — disabled inside a trial to avoid level-warp cheese
+      if (!timeTrial) {
+        if (c.startsWith('Digit') && c !== 'Digit0') {
+          const idx = parseInt(c.slice(5), 10) - 1;
+          if (idx < LEVELS.length) loadLevel(idx);
+        }
+        if (c === 'Digit0' && 9 < LEVELS.length) loadLevel(9);
+        if (c === 'BracketRight' || c === 'Equal')
+          loadLevel(Math.min(LEVELS.length - 1, currentLevel + 1));
+        if (c === 'BracketLeft' || c === 'Minus')
+          loadLevel(Math.max(0, currentLevel - 1));
+      }
     } else if (gameState === 'paused') {
       if (c === 'Escape' || c === 'KeyP') gameState = 'playing';
       if (c === 'ArrowUp')   pauseCursor = (pauseCursor + PAUSE_OPTIONS.length - 1) % PAUSE_OPTIONS.length;
@@ -749,6 +801,27 @@ window.addEventListener('keydown', (e) => {
       if (c === 'ArrowUp')    selectCursor = Math.max(0, selectCursor - LEVEL_SELECT_COLS);
       if (c === 'ArrowDown')  selectCursor = Math.min(LEVELS.length - 1, selectCursor + LEVEL_SELECT_COLS);
       if (c === 'Enter' || c === 'Space') { loadLevel(selectCursor); gameState = 'playing'; }
+    } else if (gameState === 'timeTrialMenu') {
+      if (c === 'Escape')    { gameState = 'menu'; menuCursor = 0; }
+      if (c === 'ArrowUp')   trialMenuCursor = (trialMenuCursor + TRIAL_MENU_OPTIONS.length - 1) % TRIAL_MENU_OPTIONS.length;
+      if (c === 'ArrowDown') trialMenuCursor = (trialMenuCursor + 1) % TRIAL_MENU_OPTIONS.length;
+      if (c === 'Enter' || c === 'Space') TRIAL_MENU_OPTIONS[trialMenuCursor].action();
+    } else if (gameState === 'trialLevelSelect') {
+      if (c === 'Escape') {
+        if (trialSelectMode === 'rangeEnd') { trialSelectMode = 'rangeStart'; rangePickStart = null; }
+        else gameState = 'timeTrialMenu';
+      }
+      if (c === 'ArrowLeft')  selectCursor = Math.max(0, selectCursor - 1);
+      if (c === 'ArrowRight') selectCursor = Math.min(LEVELS.length - 1, selectCursor + 1);
+      if (c === 'ArrowUp')    selectCursor = Math.max(0, selectCursor - LEVEL_SELECT_COLS);
+      if (c === 'ArrowDown')  selectCursor = Math.min(LEVELS.length - 1, selectCursor + LEVEL_SELECT_COLS);
+      if (c === 'Enter' || c === 'Space') trialSelectConfirm(selectCursor);
+    } else if (gameState === 'trialResults') {
+      if (c === 'ArrowUp')   trialResultsCursor = (trialResultsCursor + 2) % 3;
+      if (c === 'ArrowDown') trialResultsCursor = (trialResultsCursor + 1) % 3;
+      if (c === 'Enter' || c === 'Space') trialResultsAction(trialResultsCursor);
+      if (c === 'KeyR') trialResultsAction(0);
+      if (c === 'Escape') { abortTrial(); gameState = 'menu'; menuCursor = 0; }
     }
   }
   keys[c] = true;
@@ -782,22 +855,39 @@ canvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
 }, { passive: false });
 
+const TRIAL_MENU_OPTIONS = [
+  { label: 'SINGLE LEVEL', action: () => { trialSelectMode = 'single';     gameState = 'trialLevelSelect'; selectCursor = 0; rangePickStart = null; } },
+  { label: 'RANGE',        action: () => { trialSelectMode = 'rangeStart'; gameState = 'trialLevelSelect'; selectCursor = 0; rangePickStart = null; } },
+  { label: 'FULL GAME RUN',action: () => { startTrial('full', 0, LEVELS.length - 1); } },
+  { label: 'BACK',         action: () => { gameState = 'menu'; menuCursor = 0; } },
+];
+
 const LEVEL_SELECT_COLS = 5;
 const LEVEL_SELECT_ROWS = 6;
 
 const MENU_OPTIONS = [
   { label: 'PLAY',         action: () => { loadLevel(loadSavedLevel()); gameState = 'playing'; } },
   { label: 'LEVEL SELECT', action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
+  { label: 'TIME TRIAL',   action: () => { gameState = 'timeTrialMenu'; trialMenuCursor = 0; } },
   { label: 'SOUND: ON',    dyn: () => 'SOUND: ' + (muted ? 'OFF' : 'ON'),
                             action: () => { toggleMute(); } },
 ];
 
 const PAUSE_OPTIONS = [
   { label: 'RESUME',        action: () => { gameState = 'playing'; } },
-  { label: 'RESTART LEVEL', action: () => { loadLevel(currentLevel); gameState = 'playing'; } },
-  { label: 'LEVEL SELECT',  action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
-  { label: 'MAIN MENU',     action: () => { gameState = 'menu'; menuCursor = 0; } },
-  { label: 'MUTE: ON',      dyn: () => 'MUTE: ' + (muted ? 'OFF' : 'ON'),
+  { label: 'RESTART LEVEL', dyn: () => timeTrial ? 'RESTART TRIAL' : 'RESTART LEVEL',
+                             action: () => {
+                               if (timeTrial) {
+                                 const { type, startIdx, endIdx } = timeTrial;
+                                 startTrial(type, startIdx, endIdx);
+                               } else {
+                                 loadLevel(currentLevel);
+                                 gameState = 'playing';
+                               }
+                             } },
+  { label: 'LEVEL SELECT',  action: () => { if (timeTrial) abortTrial(); gameState = 'levelSelect'; selectCursor = currentLevel; } },
+  { label: 'MAIN MENU',     action: () => { if (timeTrial) abortTrial(); gameState = 'menu'; menuCursor = 0; } },
+  { label: 'SOUND: ON',     dyn: () => 'SOUND: ' + (muted ? 'OFF' : 'ON'),
                              action: () => { toggleMute(); } },
 ];
 
@@ -885,8 +975,238 @@ function drawMainMenu() {
 function drawPauseMenu() {
   // Draw the underlying game frame first, dimmed
   drawGameFrame();
-  drawVerticalMenu('PAUSED', PAUSE_OPTIONS, pauseCursor, (i) => pauseCursor = i,
-    levelName);
+  const sub = timeTrial
+    ? `${levelName}  ·  TRIAL ${formatMs(timeTrial.elapsedMs)} (paused)`
+    : levelName;
+  drawVerticalMenu('PAUSED', PAUSE_OPTIONS, pauseCursor, (i) => pauseCursor = i, sub);
+}
+
+function drawTimeTrialMenu() {
+  ctx.fillStyle = '#0e0b22';
+  ctx.fillRect(0, 0, W, H);
+  // mild starfield
+  for (let i = 0; i < 60; i++) {
+    const sx = (i * 137 + 23) % W;
+    const sy = (i * 211 + 17) % H;
+    const tw = (performance.now() / 500 + i * 0.3);
+    const a = 0.3 + 0.5 * ((Math.sin(tw) + 1) / 2);
+    ctx.fillStyle = `rgba(255, 255, 255, ${a})`;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  // Subtitle shows the full-game PB so the player can see what to beat
+  const sub = fullPb ? `BEST FULL RUN: ${formatMs(fullPb.ms)}` : 'no full-game best yet';
+  drawVerticalMenu('TIME TRIAL', TRIAL_MENU_OPTIONS, trialMenuCursor, (i) => trialMenuCursor = i, sub);
+}
+
+function drawTrialLevelSelect() {
+  // Background tinted by hovered/selected level's theme
+  const lv = LEVELS[selectCursor];
+  const savedTheme = currentTheme;
+  currentTheme = lv.theme || 'field';
+  drawSky();
+  currentTheme = savedTheme;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, 0, W, H);
+
+  clickables = [];
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '800 28px -apple-system, sans-serif';
+  let title = 'TIME TRIAL — PICK A LEVEL';
+  if (trialSelectMode === 'rangeStart') title = 'TIME TRIAL — PICK START';
+  if (trialSelectMode === 'rangeEnd')   title = `TIME TRIAL — PICK END  (start: lvl ${rangePickStart + 1})`;
+  ctx.fillText(title, W / 2, 42);
+
+  const cellW = 80, cellH = 50, gapX = 12, gapY = 12;
+  const gridW = LEVEL_SELECT_COLS * cellW + (LEVEL_SELECT_COLS - 1) * gapX;
+  const startX = (W - gridW) / 2;
+  const startY = 72;
+
+  for (let i = 0; i < LEVELS.length; i++) {
+    const row = Math.floor(i / LEVEL_SELECT_COLS);
+    const col = i % LEVEL_SELECT_COLS;
+    const x = startX + col * (cellW + gapX);
+    const y = startY + row * (cellH + gapY);
+    const lvi = LEVELS[i];
+    const isBoss = !!lvi.boss;
+    const hovered = mouseX >= x && mouseX <= x + cellW && mouseY >= y && mouseY <= y + cellH;
+    if (hovered && mouseY >= startY) selectCursor = i;
+    const selected = i === selectCursor;
+    const isStart  = i === rangePickStart;
+    const disabled = trialSelectMode === 'rangeEnd' && i < rangePickStart;
+
+    let bg = isBoss ? 'rgba(180, 40, 40, 0.30)' : 'rgba(255, 255, 255, 0.10)';
+    if (isStart)  bg = 'rgba(80, 220, 120, 0.35)';
+    if (selected) bg = 'rgba(255, 221, 51, 0.25)';
+    if (disabled) bg = 'rgba(100, 100, 100, 0.20)';
+    ctx.fillStyle = bg;
+    ctx.fillRect(x, y, cellW, cellH);
+
+    const border = isStart ? '#66ff88'
+                  : selected ? '#ffdd33'
+                  : isBoss ? '#ff6644'
+                  : 'rgba(255,255,255,0.45)';
+    ctx.fillStyle = border;
+    ctx.fillRect(x, y, cellW, 2);
+    ctx.fillRect(x, y + cellH - 2, cellW, 2);
+    ctx.fillRect(x, y, 2, cellH);
+    ctx.fillRect(x + cellW - 2, y, 2, cellH);
+
+    // Number + name
+    ctx.fillStyle = disabled ? 'rgba(255,255,255,0.3)' : (selected ? '#ffdd33' : '#fff');
+    ctx.font = '800 16px -apple-system, sans-serif';
+    ctx.fillText(String(i + 1), x + cellW / 2, y + 20);
+    ctx.font = '600 9px -apple-system, sans-serif';
+    ctx.fillStyle = disabled ? 'rgba(255,255,255,0.3)' : (selected ? '#ffdd33' : 'rgba(255,255,255,0.7)');
+    ctx.fillText(lvi.name, x + cellW / 2, y + 32);
+    // PB
+    const pb = levelPbs[i];
+    ctx.font = '500 9px -apple-system, sans-serif';
+    ctx.fillStyle = pb ? 'rgba(255, 230, 100, 0.85)' : 'rgba(255,255,255,0.35)';
+    ctx.fillText(pb ? formatMs(pb) : '—', x + cellW / 2, y + 44);
+
+    if (!disabled) {
+      clickables.push({
+        x, y, w: cellW, h: cellH,
+        action: () => { selectCursor = i; trialSelectConfirm(i); },
+      });
+    }
+  }
+
+  // Footer with the relevant best for range
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '500 12px -apple-system, sans-serif';
+  let footer = 'arrows + Enter · or click a level · Esc to back out';
+  if (trialSelectMode === 'rangeEnd' && rangePickStart != null && selectCursor >= rangePickStart) {
+    const key = `${rangePickStart}-${selectCursor}`;
+    const rp = rangePbs[key];
+    footer = rp ? `range ${rangePickStart + 1}–${selectCursor + 1}  ·  best ${formatMs(rp.ms)}  ·  Enter to start` :
+                  `range ${rangePickStart + 1}–${selectCursor + 1}  ·  no best yet  ·  Enter to start`;
+  }
+  ctx.fillText(footer, W / 2, H - 18);
+  ctx.textAlign = 'left';
+}
+
+function drawTrialResults() {
+  // Draw the underlying game frame (frozen)
+  drawGameFrame();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.78)';
+  ctx.fillRect(0, 0, W, H);
+  clickables = [];
+
+  const dnf = timeTrial && timeTrial.dnf;
+  const tt = timeTrial || { elapsedMs: 0, splits: [], deaths: 0, type: 'single', startIdx: 0, endIdx: 0, newBest: false, konamiActive: false };
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = dnf ? '#ff5566' : '#ffdd33';
+  ctx.font = '800 30px -apple-system, sans-serif';
+  ctx.fillText(dnf ? 'DNF — OUT OF LIVES' : 'TIME TRIAL COMPLETE', W / 2, 56);
+
+  // Big time
+  ctx.fillStyle = '#fff';
+  ctx.font = '900 56px -apple-system, sans-serif';
+  ctx.fillText(formatMs(tt.elapsedMs), W / 2, 118);
+
+  // Comparison
+  ctx.font = '600 14px -apple-system, sans-serif';
+  if (!dnf) {
+    let pbMs = null;
+    if (tt.type === 'single')      pbMs = levelPbs[tt.startIdx];
+    else if (tt.type === 'range')  { const r = rangePbs[`${tt.startIdx}-${tt.endIdx}`]; pbMs = r ? r.ms : null; }
+    else if (tt.type === 'full')   pbMs = fullPb ? fullPb.ms : null;
+
+    if (tt.newBest) {
+      ctx.fillStyle = '#66ff99';
+      ctx.fillText('★ NEW PERSONAL BEST ★', W / 2, 142);
+    } else if (pbMs != null) {
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText(`previous best: ${formatMs(pbMs)}`, W / 2, 142);
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('first time on this run', W / 2, 142);
+    }
+    if (tt.konamiActive) {
+      ctx.fillStyle = 'rgba(255, 100, 100, 0.7)';
+      ctx.fillText('konami unlock active — PB not saved', W / 2, 160);
+    }
+  }
+
+  // Deaths + splits
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.font = '600 13px -apple-system, sans-serif';
+  ctx.fillText(`deaths: ${tt.deaths}`, W / 2, 178);
+
+  if (tt.type !== 'single' && tt.splits.length) {
+    ctx.font = '500 11px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    const splitX = W / 2 - 110;
+    let prevMs = 0;
+    const maxShow = Math.min(tt.splits.length, 10);
+    for (let i = 0; i < maxShow; i++) {
+      const sp = tt.splits[i];
+      const segMs = sp.ms - prevMs;
+      prevMs = sp.ms;
+      const y = 200 + i * 14;
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText(LEVELS[sp.level].name, splitX, y);
+      ctx.fillStyle = '#ffdd33';
+      ctx.fillText(formatMs(segMs), splitX + 130, y);
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText(`(${formatMs(sp.ms)})`, splitX + 200, y);
+    }
+    if (tt.splits.length > maxShow) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText(`+ ${tt.splits.length - maxShow} more…`, splitX, 200 + maxShow * 14);
+    }
+    ctx.textAlign = 'center';
+  }
+
+  // Buttons
+  const labels = ['RETRY', 'LEVEL SELECT', 'MAIN MENU'];
+  const btnW = 200, btnH = 36, gap = 10;
+  const startBtnY = H - btnH * labels.length - gap * (labels.length - 1) - 26;
+  for (let i = 0; i < labels.length; i++) {
+    const x = (W - btnW) / 2;
+    const y = startBtnY + i * (btnH + gap);
+    const hovered = mouseX >= x && mouseX <= x + btnW && mouseY >= y && mouseY <= y + btnH;
+    if (hovered) trialResultsCursor = i;
+    const selected = i === trialResultsCursor;
+    ctx.fillStyle = selected ? 'rgba(255, 221, 51, 0.25)' : 'rgba(255, 255, 255, 0.08)';
+    ctx.fillRect(x, y, btnW, btnH);
+    ctx.fillStyle = selected ? '#ffdd33' : 'rgba(255,255,255,0.4)';
+    ctx.fillRect(x, y, btnW, 2);
+    ctx.fillRect(x, y + btnH - 2, btnW, 2);
+    ctx.fillRect(x, y, 2, btnH);
+    ctx.fillRect(x + btnW - 2, y, 2, btnH);
+    ctx.fillStyle = selected ? '#ffdd33' : '#fff';
+    ctx.font = '700 16px -apple-system, sans-serif';
+    ctx.fillText(labels[i], W / 2, y + btnH / 2 + 5);
+    clickables.push({ x, y, w: btnW, h: btnH, action: () => trialResultsAction(i) });
+  }
+
+  ctx.textAlign = 'left';
+}
+
+function drawTrialHud() {
+  if (!timeTrial) return;
+  // Big monospace-ish time top-center
+  const time = formatMs(timeTrial.elapsedMs);
+  const padW = 168, padH = 30;
+  const padX = (W - padW) / 2, padY = 8;
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(padX, padY, padW, padH);
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '800 22px "SF Mono", Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(time, W / 2, padY + 22);
+  if (timeTrial.type !== 'single') {
+    const lvIdx = timeTrial.splits.length; // current 0-based within the run
+    const total = timeTrial.endIdx - timeTrial.startIdx + 1;
+    ctx.font = '500 10px -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(`lvl ${lvIdx + 1}/${total}  ·  deaths ${timeTrial.deaths}`, W / 2, padY + padH + 12);
+  }
+  ctx.textAlign = 'left';
 }
 
 function drawLevelSelect() {
@@ -1002,10 +1322,13 @@ function loadLevel(idx) {
   const lv = LEVELS[idx];
   const prevWorld = Math.floor(currentLevel / 3);
   const newWorld = Math.floor(idx / 3);
-  if (prevWorld !== newWorld) livesLeft = LIVES_PER_WORLD;
+  // Cross-world lives refill is suppressed during a trial so range/full runs
+  // can't pad themselves with free hearts every 3 levels.
+  if (prevWorld !== newWorld && !timeTrial) livesLeft = LIVES_PER_WORLD;
   currentLevel = idx;
   levelName = lv.name;
-  saveProgress();
+  // Don't pollute the casual resume value while a trial is running
+  if (!timeTrial) saveProgress();
   spawn = { x: lv.spawn.x, y: lv.spawn.y };
   // Deep-copy platforms and bots so we don't mutate the level definition
   platforms = lv.platforms.map((p) => ({ ...p }));
@@ -1032,16 +1355,25 @@ function pressing(...names) {
 }
 
 function update() {
+  // Tick the trial timer (frame-stepped so pause naturally stops it)
+  if (timeTrial && !timeTrial.finished && !levelComplete) {
+    timeTrial.elapsedMs += FRAME_MS;
+  }
+
   if (levelComplete) {
     levelCompleteTimer++;
-    if (advanceQueued && levelCompleteTimer > 30) {
-      advanceQueued = false;
-      const next = currentLevel + 1;
-      if (next < LEVELS.length) {
-        loadLevel(next);
-      } else {
-        // last level — restart from beginning for now
-        loadLevel(0);
+    // During a trial we already handled the trial-finish/auto-advance in
+    // onLevelCleared — suppress the normal advanceQueued flow.
+    if (!timeTrial) {
+      if (advanceQueued && levelCompleteTimer > 30) {
+        advanceQueued = false;
+        const next = currentLevel + 1;
+        if (next < LEVELS.length) {
+          loadLevel(next);
+        } else {
+          // last level — restart from beginning for now
+          loadLevel(0);
+        }
       }
     }
     advanceQueued = false;
@@ -1166,6 +1498,10 @@ function update() {
   if (goal && overlap(player, goal)) {
     if (!levelComplete) {
       audio.winLevel();
+      if (timeTrial) {
+        onLevelCleared();
+        return; // trial took over — don't fall through to setting levelComplete
+      }
     }
     levelComplete = true;
     levelCompleteTimer = 0;
@@ -1311,8 +1647,23 @@ function respawn() {
 // Death uses up a life. With lives left, you respawn at the SAME level you
 // died on. When you run out of lives, the whole world restarts at its first
 // level and your life counter refills.
+//
+// Inside a time trial: each death increments the death counter and respawns
+// on the same level (lives are effectively shared across the run). Out of
+// lives ends the trial as DNF.
 function die() {
   audio.die();
+  if (timeTrial) {
+    timeTrial.deaths++;
+    livesLeft--;
+    if (livesLeft <= 0) {
+      // Trial DNF — no PB written
+      endTrial(true);
+      return;
+    }
+    loadLevel(currentLevel);
+    return;
+  }
   livesLeft--;
   if (livesLeft <= 0) {
     livesLeft = LIVES_PER_WORLD;
@@ -1320,6 +1671,149 @@ function die() {
     loadLevel(worldFirst);
   } else {
     loadLevel(currentLevel);
+  }
+}
+
+// ─────────── Trial control ───────────
+function formatMs(ms) {
+  if (ms == null) return '—';
+  const cs    = Math.floor(ms / 10) % 100;
+  const sec   = Math.floor(ms / 1000) % 60;
+  const min   = Math.floor(ms / 60000) % 60;
+  const hours = Math.floor(ms / 3600000);
+  const pad2  = (n) => n.toString().padStart(2, '0');
+  if (hours > 0) return `${hours}:${pad2(min)}:${pad2(sec)}.${pad2(cs)}`;
+  return `${pad2(min)}:${pad2(sec)}.${pad2(cs)}`;
+}
+
+function startTrial(type, startIdx, endIdx) {
+  timeTrial = {
+    type,
+    startIdx,
+    endIdx,
+    elapsedMs: 0,
+    splits: [],
+    deaths: 0,
+    finished: false,
+    dnf: false,
+    newBest: false,
+    konamiActive: konamiUnlocked,
+  };
+  livesLeft = LIVES_PER_WORLD;
+  jumpQueued = false;
+  dashQueued = false;
+  advanceQueued = false;
+  levelComplete = false;
+  levelCompleteTimer = 0;
+  loadLevel(startIdx);
+  gameState = 'playing';
+}
+
+// Called when a level is cleared (goal flag OR boss defeat). Returns true if
+// the trial logic took over the level-complete behavior (suppresses the
+// normal "press SPACE to continue" overlay).
+function onLevelCleared() {
+  if (!timeTrial || timeTrial.finished) return false;
+  // Capture this level's split
+  timeTrial.splits.push({ level: currentLevel, ms: timeTrial.elapsedMs });
+  if (currentLevel >= timeTrial.endIdx) {
+    timeTrial.finished = true;
+    finalizeTrialResults();
+    gameState = 'trialResults';
+    trialResultsCursor = 0;
+    return true;
+  }
+  // Auto-advance to next level on the next frame
+  loadLevel(currentLevel + 1);
+  return true;
+}
+
+function finalizeTrialResults() {
+  if (!timeTrial || timeTrial.dnf) return;
+  // PB writes are refused if konami was ever active during the run
+  // (captured at start, or toggled on mid-run).
+  if (timeTrial.konamiActive || konamiUnlocked) return;
+  const finalMs = timeTrial.elapsedMs;
+  if (timeTrial.type === 'single' || timeTrial.startIdx === timeTrial.endIdx) {
+    // Single-level: update levelPbs[currentLevel]
+    const lvIdx = timeTrial.startIdx;
+    if (levelPbs[lvIdx] == null || finalMs < levelPbs[lvIdx]) {
+      levelPbs[lvIdx] = finalMs;
+      saveJson(TT_KEYS.levelPbs, levelPbs);
+      timeTrial.newBest = true;
+    }
+  } else if (timeTrial.type === 'range') {
+    const key = `${timeTrial.startIdx}-${timeTrial.endIdx}`;
+    const prev = rangePbs[key];
+    if (!prev || finalMs < prev.ms) {
+      rangePbs[key] = { ms: finalMs, splits: timeTrial.splits.slice(), deaths: timeTrial.deaths };
+      saveJson(TT_KEYS.rangePbs, rangePbs);
+      timeTrial.newBest = true;
+    }
+  } else if (timeTrial.type === 'full') {
+    if (!fullPb || finalMs < fullPb.ms) {
+      fullPb = { ms: finalMs, splits: timeTrial.splits.slice(), deaths: timeTrial.deaths };
+      saveJson(TT_KEYS.fullPb, fullPb);
+      timeTrial.newBest = true;
+    }
+  }
+  // Also update per-level split PBs (best individual level time from any run)
+  let prevMs = 0;
+  for (let i = 0; i < timeTrial.splits.length; i++) {
+    const sp = timeTrial.splits[i];
+    const segMs = sp.ms - prevMs;
+    if (levelPbs[sp.level] == null || segMs < levelPbs[sp.level]) {
+      levelPbs[sp.level] = segMs;
+    }
+    prevMs = sp.ms;
+  }
+  saveJson(TT_KEYS.levelPbs, levelPbs);
+}
+
+function endTrial(dnf) {
+  if (!timeTrial) return;
+  timeTrial.finished = true;
+  timeTrial.dnf = !!dnf;
+  if (!dnf) finalizeTrialResults();
+  gameState = 'trialResults';
+  trialResultsCursor = 0;
+}
+
+function abortTrial() {
+  // Clean exit without writing — used by quit-from-pause
+  timeTrial = null;
+  livesLeft = LIVES_PER_WORLD;
+}
+
+function trialSelectConfirm(idx) {
+  if (trialSelectMode === 'single') {
+    startTrial('single', idx, idx);
+  } else if (trialSelectMode === 'rangeStart') {
+    rangePickStart = idx;
+    trialSelectMode = 'rangeEnd';
+  } else if (trialSelectMode === 'rangeEnd') {
+    if (idx >= rangePickStart) {
+      startTrial('range', rangePickStart, idx);
+    }
+  }
+}
+
+function trialResultsAction(idx) {
+  if (!timeTrial) return;
+  if (idx === 0) {
+    // RETRY
+    const { type, startIdx, endIdx } = timeTrial;
+    startTrial(type, startIdx, endIdx);
+  } else if (idx === 1) {
+    // LEVEL SELECT
+    abortTrial();
+    gameState = 'levelSelect';
+    selectCursor = currentLevel;
+  } else {
+    // MAIN MENU
+    abortTrial();
+    gameState = 'menu';
+    menuCursor = 0;
   }
 }
 
@@ -1443,10 +1937,14 @@ function handleBossCollision() {
 
     if (boss.hp <= 0) {
       boss.state = 'defeated';
+      (boss.isFinal ? audio.winGame : audio.winLevel)();
+      if (timeTrial) {
+        onLevelCleared();
+        return; // trial took over — don't set levelComplete (current level may have changed)
+      }
       levelComplete = true;
       levelCompleteTimer = 0;
       advanceQueued = false;
-      (boss.isFinal ? audio.winGame : audio.winLevel)();
     } else {
       // No freeze — boss immediately winds up an attack (timing depends on boss type)
       boss.state = 'telegraph';
@@ -2412,6 +2910,7 @@ function drawGameFrame() {
   drawProjectiles();
   drawPlayer();
   drawHUD();
+  drawTrialHud();
   drawKonamiNotif();
   if (levelComplete) drawLevelComplete();
 }
@@ -2435,6 +2934,12 @@ function loop() {
     drawLevelSelect();
   } else if (gameState === 'gameOver') {
     drawGameOver();
+  } else if (gameState === 'timeTrialMenu') {
+    drawTimeTrialMenu();
+  } else if (gameState === 'trialLevelSelect') {
+    drawTrialLevelSelect();
+  } else if (gameState === 'trialResults') {
+    drawTrialResults();
   }
   requestAnimationFrame(loop);
 }
