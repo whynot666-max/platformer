@@ -188,7 +188,11 @@ let levelCompleteTimer = 0;
 
 // Top-level screen the player is on. Transitions:
 //   menu ⇄ levelSelect, menu → playing, playing ⇄ paused, paused → menu/levelSelect
+//   playing → gameOver → menu (when out of lives)
 let gameState = 'menu';
+const LIVES_PER_WORLD = 3;
+let livesLeft = LIVES_PER_WORLD;
+let gameOverTimer = 0;
 let menuCursor = 0;
 let pauseCursor = 0;
 let selectCursor = 0;   // 0..LEVELS.length-1
@@ -996,6 +1000,9 @@ function loadSavedLevel() {
 
 function loadLevel(idx) {
   const lv = LEVELS[idx];
+  const prevWorld = Math.floor(currentLevel / 3);
+  const newWorld = Math.floor(idx / 3);
+  if (prevWorld !== newWorld) livesLeft = LIVES_PER_WORLD;
   currentLevel = idx;
   levelName = lv.name;
   saveProgress();
@@ -1301,9 +1308,16 @@ function respawn() {
   }
 }
 
-// Death sends you back to the FIRST level of the current world (worlds are 3 levels each)
+// Death uses up a life. With lives left, you respawn at the world's first
+// level. Out of lives, you hit GAME OVER and return to the main menu.
 function die() {
   audio.die();
+  livesLeft--;
+  if (livesLeft <= 0) {
+    gameState = 'gameOver';
+    gameOverTimer = 150; // ~2.5s of GAME OVER screen before bouncing to menu
+    return;
+  }
   const worldFirst = Math.floor(currentLevel / 3) * 3;
   loadLevel(worldFirst);
 }
@@ -2064,6 +2078,8 @@ function drawHUD() {
     ctx.fillStyle = filled ? '#ff4466' : 'rgba(0,0,0,0.25)';
     drawHeart(x, y, filled);
   }
+  // Lives indicator — small player-shaped icon + count, below the hearts
+  drawLives(14, 44);
   // Level label, top-right
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.font = '600 16px -apple-system, sans-serif';
@@ -2308,6 +2324,31 @@ function drawProjectiles() {
   }
 }
 
+function drawGameOver() {
+  // Draw the current frame dimmed underneath so the player sees where they fell
+  drawGameFrame();
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, W, H);
+
+  const fadeIn = Math.min(1, (150 - gameOverTimer) / 30);
+  ctx.fillStyle = `rgba(255, 70, 80, ${fadeIn})`;
+  ctx.font = '900 72px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('GAME OVER', W / 2, H / 2 - 8);
+
+  ctx.fillStyle = `rgba(255, 255, 255, ${0.7 * fadeIn})`;
+  ctx.font = '500 16px -apple-system, sans-serif';
+  ctx.fillText('out of lives — returning to the menu', W / 2, H / 2 + 28);
+  ctx.textAlign = 'left';
+
+  gameOverTimer--;
+  if (gameOverTimer <= 0) {
+    livesLeft = LIVES_PER_WORLD;
+    gameState = 'menu';
+    menuCursor = 0;
+  }
+}
+
 function drawLevelComplete() {
   // dim overlay
   ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
@@ -2329,6 +2370,21 @@ function drawLevelComplete() {
     );
   }
   ctx.textAlign = 'left';
+}
+
+function drawLives(x, y) {
+  // mini player sprite
+  ctx.fillStyle = '#ffcc44';
+  ctx.fillRect(x, y, 12, 16);
+  ctx.fillStyle = '#cc8800';
+  ctx.fillRect(x, y + 12, 12, 4);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x + 8, y + 4, 2, 2);
+  // × N
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = '700 14px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('× ' + livesLeft, x + 16, y + 13);
 }
 
 function drawHeart(x, y, filled) {
@@ -2376,6 +2432,8 @@ function loop() {
     drawMainMenu();
   } else if (gameState === 'levelSelect') {
     drawLevelSelect();
+  } else if (gameState === 'gameOver') {
+    drawGameOver();
   }
   requestAnimationFrame(loop);
 }
