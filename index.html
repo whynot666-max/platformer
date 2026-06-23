@@ -3602,35 +3602,8 @@ const levelImg = new Image();
 levelImg.src = 'assets/level.png';
 const withoutImg = new Image();
 withoutImg.src = 'assets/without.png';
-
-// BOSS tile — generated procedurally to match the other tiles' chunky look.
-// Dark navy bg, yellow "BO / SS" stacked 2x2 like the FLAG / LEVEL tiles.
-const bossTile = (() => {
-  const c = document.createElement('canvas');
-  c.width = 24; c.height = 24;
-  const cx = c.getContext('2d');
-  cx.fillStyle = '#0d0f1c';
-  cx.fillRect(0, 0, 24, 24);
-  const GLYPHS = {
-    B: ['XXXX.','X...X','XXXX.','X...X','XXXX.'],
-    O: ['.XXX.','X...X','X...X','X...X','.XXX.'],
-    S: ['.XXXX','X....','.XXX.','....X','XXXX.'],
-  };
-  cx.fillStyle = '#ffdd33';
-  const drawG = (letter, ox, oy, s) => {
-    const pat = GLYPHS[letter];
-    for (let r = 0; r < pat.length; r++) {
-      for (let col = 0; col < pat[r].length; col++) {
-        if (pat[r][col] === 'X') cx.fillRect(ox + col * s, oy + r * s, s, s);
-      }
-    }
-  };
-  drawG('B', 2,  2,  2);
-  drawG('O', 12, 2,  2);
-  drawG('S', 2,  12, 2);
-  drawG('S', 12, 12, 2);
-  return c;
-})();
+const bossImg = new Image();
+bossImg.src = 'assets/boss.png';
 
 function drawBabaRule() {
   if (!babaRule) return;
@@ -3638,7 +3611,7 @@ function drawBabaRule() {
   // Everything else: standard FLAG IS WIN.
   const isBossRule = boss && !goal;
   const tiles = isBossRule
-    ? [levelImg, withoutImg, bossTile, isImg, winImg]
+    ? [levelImg, withoutImg, bossImg, isImg, winImg]
     : [flagImg, isImg, winImg];
 
   const bob = Math.sin(performance.now() / 450) * 2.5;
