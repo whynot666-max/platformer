@@ -235,6 +235,199 @@ let trialMenuCursor = 0;
 let trialSelectMode = 'single'; // 'single' | 'rangeStart' | 'rangeEnd'
 let rangePickStart  = null;
 let trialResultsCursor = 0;
+
+// ─────────── Level Editor state + storage ───────────
+const ED_DRAFT_KEY = 'platformer.editor.draft';
+const ED_PB_KEY    = 'platformer.custom.pb';
+
+// Bot kind chars for compact storage
+const BOT_KIND_CHARS = { sprout: 's', floater: 'f', sentry: 'n', charger: 'c' };
+const BOT_KIND_FROM_CHAR = { s: 'sprout', f: 'floater', n: 'sentry', c: 'charger' };
+
+// Inflate an editor-form bot into a runtime bot (the shape loadLevel expects).
+function inflateBot(b) {
+  if (b.kind === 'sprout')  return sprout(b.x, b.y, b.pMin, b.pMax, b.speed ?? 1.3);
+  if (b.kind === 'floater') return floater(b.x, b.y, b.pMin, b.pMax, b.speed ?? 1.4);
+  if (b.kind === 'sentry')  return sentry(b.x, b.y, b.interval ?? 90);
+  if (b.kind === 'charger') return charger(b.x, b.y, b.pMin, b.pMax, b.speed ?? 1.3);
+  return null;
+}
+
+// Editor-form ↔ runtime-form. Editor-form is what the editor and storage
+// manipulate; runtime-form is what loadLevel/initFromLevelObject consume.
+function levelToRuntime(ed) {
+  return {
+    name: ed.name,
+    theme: ed.theme,
+    spawn: { x: ed.spawn.x, y: ed.spawn.y },
+    platforms: ed.platforms.map((p) => ({ ...p })),
+    bots: ed.bots.map(inflateBot).filter(Boolean),
+    goal: ed.goal ? { ...ed.goal } : null,
+    babaRule: ed.babaRule ? { ...ed.babaRule } : null,
+    boss: ed.boss ? { ...ed.boss, isFinal: false } : null,
+  };
+}
+
+// Compact JSON ↔ editor-form. Uses short keys + integer truncation to keep
+// shared URLs small.
+function compactLevel(ed) {
+  const c = {
+    v: 1,
+    n: ed.name || 'Custom',
+    t: ed.theme || 'field',
+    s: [Math.round(ed.spawn.x), Math.round(ed.spawn.y)],
+    p: ed.platforms.map((p) => [Math.round(p.x), Math.round(p.y), Math.round(p.w), Math.round(p.h)]),
+    b: ed.bots.map((b) => {
+      const arr = [BOT_KIND_CHARS[b.kind] || 's', Math.round(b.x), Math.round(b.y)];
+      if (b.kind === 'sentry') arr.push(b.interval ?? 90);
+      else arr.push(Math.round(b.pMin ?? b.x), Math.round(b.pMax ?? b.x + 50), b.speed ?? 1.3);
+      return arr;
+    }),
+    g: ed.goal ? [Math.round(ed.goal.x), Math.round(ed.goal.y), Math.round(ed.goal.w), Math.round(ed.goal.h)] : null,
+  };
+  if (ed.babaRule) c.r = [Math.round(ed.babaRule.x), Math.round(ed.babaRule.y)];
+  if (ed.boss)     c.B = [Math.round(ed.boss.x), Math.round(ed.boss.y), Math.round(ed.boss.w), Math.round(ed.boss.h), ed.boss.hp];
+  return c;
+}
+
+function expandLevel(c) {
+  if (!c || c.v !== 1) return null;
+  const ed = {
+    name: String(c.n || 'Custom').slice(0, 32),
+    theme: THEME_SKY[c.t] ? c.t : 'field',
+    spawn: { x: c.s[0], y: c.s[1] },
+    platforms: (c.p || []).map(([x, y, w, h]) => ({ x, y, w, h })),
+    bots: (c.b || []).map((b) => {
+      const kind = BOT_KIND_FROM_CHAR[b[0]] || 'sprout';
+      if (kind === 'sentry') return { kind, x: b[1], y: b[2], interval: b[3] ?? 90 };
+      return { kind, x: b[1], y: b[2], pMin: b[3], pMax: b[4], speed: b[5] ?? 1.3 };
+    }),
+    goal: c.g ? { x: c.g[0], y: c.g[1], w: c.g[2], h: c.g[3] } : null,
+    babaRule: c.r ? { x: c.r[0], y: c.r[1] } : null,
+    boss: c.B ? { x: c.B[0], y: c.B[1], w: c.B[2], h: c.B[3], hp: c.B[4], isFinal: false } : null,
+  };
+  return validateLevel(ed) ? ed : null;
+}
+
+function validateLevel(ed) {
+  if (!ed || !ed.spawn) return false;
+  if (typeof ed.spawn.x !== 'number' || typeof ed.spawn.y !== 'number') return false;
+  if (!Array.isArray(ed.platforms) || ed.platforms.length > 80) return false;
+  if (!Array.isArray(ed.bots) || ed.bots.length > 50) return false;
+  for (const p of ed.platforms) {
+    if (typeof p.x !== 'number' || typeof p.y !== 'number') return false;
+    if (typeof p.w !== 'number' || typeof p.h !== 'number') return false;
+    if (p.x < -100 || p.y < -100 || p.x + p.w > W + 100 || p.y + p.h > H + 100) return false;
+  }
+  for (const b of ed.bots) {
+    if (!['sprout','floater','sentry','charger'].includes(b.kind)) return false;
+    if (typeof b.x !== 'number' || typeof b.y !== 'number') return false;
+  }
+  return true;
+}
+
+// base64url (RFC 4648 §5) — survives chat-app auto-linkers
+function b64urlEncode(str) {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function b64urlDecode(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  try { return decodeURIComponent(escape(atob(s))); } catch (e) { return null; }
+}
+
+function encodeShareString(ed) {
+  return b64urlEncode(JSON.stringify(compactLevel(ed)));
+}
+function decodeShareString(s) {
+  const json = b64urlDecode(s);
+  if (!json) return null;
+  let parsed = null;
+  try { parsed = JSON.parse(json); } catch (e) { return null; }
+  return expandLevel(parsed);
+}
+
+// Custom-level state
+let customLevelActive = null;    // runtime-form level; null = playing built-in
+let returnToEditorOnExit = false; // set when test-play was launched from editor
+let sharedLevelPending = null;   // editor-form level decoded from URL hash, awaiting prompt
+
+// Per-content-hash PB store for custom levels
+function customPbHash(ed) {
+  // Cheap synchronous hash (FNV-1a-ish) over compact JSON minus name
+  const c = compactLevel(ed); delete c.n;
+  const s = JSON.stringify(c);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+function loadCustomPbs() { return loadJson(ED_PB_KEY, {}); }
+function saveCustomPbs(pbs) { saveJson(ED_PB_KEY, pbs); }
+
+// Editor working state
+const ED_BLANK = () => ({
+  name: 'My Level',
+  theme: 'field',
+  spawn: { x: 80, y: 380 },
+  platforms: [
+    { x: 0, y: H - 40, w: W, h: 40 }, // a floor by default
+  ],
+  bots: [],
+  goal: { x: 740, y: H - 40 - 60, w: 24, h: 60 },
+  babaRule: null,
+  boss: null,
+});
+
+let editorLevel = ED_BLANK();
+let editorTool = 'select';
+// editorSelection: null OR { type:'platform'|'bot'|'goal'|'spawn'|'baba'|'boss', index?: number }
+let editorSelection = null;
+let editorDrag = null;           // { type, mode:'move'|'resizeR'|'resizeB'|'resizeBR'|'patrolMin'|'patrolMax', ox, oy, orig }
+let editorPatrolBot = null;      // bot whose patrol endpoints we're currently picking
+let editorPatrolStep = 0;        // 0=picking pMin, 1=picking pMax
+let editorDirty = false;
+let editorToastMs = 0;
+let editorToastText = '';
+let sharedConfirmCursor = 0;
+
+function editorToast(text, ms = 90) {
+  editorToastText = text;
+  editorToastMs = ms;
+}
+
+function saveEditorDraft() {
+  saveJson(ED_DRAFT_KEY, compactLevel(editorLevel));
+  editorDirty = false;
+}
+function loadEditorDraft() {
+  const c = loadJson(ED_DRAFT_KEY, null);
+  if (!c) return false;
+  const ed = expandLevel(c);
+  if (!ed) return false;
+  editorLevel = ed;
+  editorSelection = null;
+  editorPatrolBot = null;
+  editorDirty = false;
+  return true;
+}
+
+const ED_TOOLS = [
+  { id: 'select',  label: 'SELECT',  hotkey: 'V' },
+  { id: 'platform',label: 'PLATFORM',hotkey: 'P' },
+  { id: 'sprout',  label: 'SPROUT',  hotkey: 'S' },
+  { id: 'floater', label: 'FLOATER', hotkey: 'F' },
+  { id: 'sentry',  label: 'SENTRY',  hotkey: 'N' },
+  { id: 'charger', label: 'CHARGER', hotkey: 'C' },
+  { id: 'spawn',   label: 'SPAWN',   hotkey: 'H' },
+  { id: 'goal',    label: 'GOAL',    hotkey: 'G' },
+  { id: 'baba',    label: 'BABA',    hotkey: 'B' },
+  { id: 'boss',    label: 'BOSS',    hotkey: 'X' },
+  { id: 'delete',  label: 'DELETE',  hotkey: 'E' },
+];
 let menuCursor = 0;
 let pauseCursor = 0;
 let selectCursor = 0;   // 0..LEVELS.length-1
@@ -822,6 +1015,39 @@ window.addEventListener('keydown', (e) => {
       if (c === 'Enter' || c === 'Space') trialResultsAction(trialResultsCursor);
       if (c === 'KeyR') trialResultsAction(0);
       if (c === 'Escape') { abortTrial(); gameState = 'menu'; menuCursor = 0; }
+    } else if (gameState === 'editor') {
+      // Tool hotkeys
+      for (const t of ED_TOOLS) {
+        if (c === 'Key' + t.hotkey) {
+          editorTool = t.id;
+          editorSelection = null;
+          editorPatrolBot = null;
+          break;
+        }
+      }
+      if (c === 'Space') editorTestPlay();
+      if (c === 'Escape') {
+        if (editorPatrolBot) { editorPatrolBot = null; editorPatrolStep = 0; }
+        else if (editorSelection) editorSelection = null;
+        else { saveEditorDraft(); gameState = 'menu'; menuCursor = 0; }
+      }
+      if ((c === 'Delete' || c === 'Backspace') && editorSelection) {
+        const sel = editorSelection;
+        if (sel.type === 'platform') editorLevel.platforms.splice(sel.index, 1);
+        else if (sel.type === 'bot') editorLevel.bots.splice(sel.index, 1);
+        else if (sel.type === 'goal') editorLevel.goal = null;
+        else if (sel.type === 'boss') editorLevel.boss = null;
+        else if (sel.type === 'baba') editorLevel.babaRule = null;
+        editorSelection = null;
+        editorDirty = true;
+        saveEditorDraft();
+      }
+      if (c === 'KeyT') editorCycleTheme();
+    } else if (gameState === 'sharedConfirm') {
+      if (c === 'ArrowUp')   sharedConfirmCursor = (sharedConfirmCursor + 2) % 3;
+      if (c === 'ArrowDown') sharedConfirmCursor = (sharedConfirmCursor + 1) % 3;
+      if (c === 'Enter' || c === 'Space') sharedConfirmAction(sharedConfirmCursor);
+      if (c === 'Escape') { sharedLevelPending = null; gameState = 'menu'; menuCursor = 0; }
     }
   }
   keys[c] = true;
@@ -844,14 +1070,38 @@ canvas.addEventListener('mousedown', (e) => {
   if (gameState === 'playing') return; // game uses keyboard/touch buttons
   const p = canvasPoint(e.clientX, e.clientY);
   mouseX = p.x; mouseY = p.y;
+  if (gameState === 'editor') { editorMouseDown(mouseX, mouseY); return; }
   clickQueued = true;
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (gameState === 'editor') editorMouseMove(mouseX, mouseY);
+});
+canvas.addEventListener('mouseup', (e) => {
+  if (gameState === 'editor') {
+    const p = canvasPoint(e.clientX, e.clientY);
+    editorMouseUp(p.x, p.y);
+  }
 });
 canvas.addEventListener('touchstart', (e) => {
   if (gameState === 'playing') return;
   const t = e.touches[0]; if (!t) return;
   const p = canvasPoint(t.clientX, t.clientY);
   mouseX = p.x; mouseY = p.y;
+  if (gameState === 'editor') { editorMouseDown(mouseX, mouseY); e.preventDefault(); return; }
   clickQueued = true;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  if (gameState !== 'editor') return;
+  const t = e.touches[0]; if (!t) return;
+  const p = canvasPoint(t.clientX, t.clientY);
+  mouseX = p.x; mouseY = p.y;
+  editorMouseMove(mouseX, mouseY);
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', (e) => {
+  if (gameState !== 'editor') return;
+  editorMouseUp(mouseX, mouseY);
   e.preventDefault();
 }, { passive: false });
 
@@ -867,26 +1117,61 @@ const LEVEL_SELECT_ROWS = 6;
 
 const MENU_OPTIONS = [
   { label: 'PLAY',         action: () => { loadLevel(loadSavedLevel()); gameState = 'playing'; } },
-  { label: 'LEVEL SELECT', action: () => { gameState = 'levelSelect'; selectCursor = currentLevel; } },
+  { label: 'LEVEL SELECT', action: () => { gameState = 'levelSelect'; selectCursor = currentLevel ?? 0; } },
   { label: 'TIME TRIAL',   action: () => { gameState = 'timeTrialMenu'; trialMenuCursor = 0; } },
+  { label: 'LEVEL EDITOR', action: () => { enterEditor(); } },
   { label: 'SOUND: ON',    dyn: () => 'SOUND: ' + (muted ? 'OFF' : 'ON'),
                             action: () => { toggleMute(); } },
 ];
 
+function enterEditor() {
+  // Restore the autosaved draft if present, else start blank
+  if (!loadEditorDraft()) {
+    editorLevel = ED_BLANK();
+  }
+  editorTool = 'select';
+  editorSelection = null;
+  editorPatrolBot = null;
+  editorPatrolStep = 0;
+  editorDrag = null;
+  currentTheme = editorLevel.theme;
+  gameState = 'editor';
+}
+
 const PAUSE_OPTIONS = [
   { label: 'RESUME',        action: () => { gameState = 'playing'; } },
-  { label: 'RESTART LEVEL', dyn: () => timeTrial ? 'RESTART TRIAL' : 'RESTART LEVEL',
+  { label: 'RESTART LEVEL', dyn: () => timeTrial ? 'RESTART TRIAL'
+                                       : customLevelActive ? 'RESTART LEVEL'
+                                       : 'RESTART LEVEL',
                              action: () => {
                                if (timeTrial) {
                                  const { type, startIdx, endIdx } = timeTrial;
                                  startTrial(type, startIdx, endIdx);
+                               } else if (customLevelActive) {
+                                 loadCustomLevel(customLevelActive.editor, { fromEditor: returnToEditorOnExit });
+                                 gameState = 'playing';
                                } else {
                                  loadLevel(currentLevel);
                                  gameState = 'playing';
                                }
                              } },
-  { label: 'LEVEL SELECT',  action: () => { if (timeTrial) abortTrial(); gameState = 'levelSelect'; selectCursor = currentLevel; } },
-  { label: 'MAIN MENU',     action: () => { if (timeTrial) abortTrial(); gameState = 'menu'; menuCursor = 0; } },
+  { label: 'LEVEL SELECT',  action: () => {
+                               if (timeTrial) abortTrial();
+                               if (customLevelActive) {
+                                 const ret = returnToEditorOnExit;
+                                 customLevelActive = null;
+                                 returnToEditorOnExit = false;
+                                 if (ret) { gameState = 'editor'; return; }
+                               }
+                               gameState = 'levelSelect';
+                               selectCursor = currentLevel ?? 0;
+                             } },
+  { label: 'MAIN MENU',     action: () => {
+                               if (timeTrial) abortTrial();
+                               customLevelActive = null;
+                               returnToEditorOnExit = false;
+                               gameState = 'menu'; menuCursor = 0;
+                             } },
   { label: 'SOUND: ON',     dyn: () => 'SOUND: ' + (muted ? 'OFF' : 'ON'),
                              action: () => { toggleMute(); } },
 ];
@@ -1209,6 +1494,624 @@ function drawTrialHud() {
   ctx.textAlign = 'left';
 }
 
+// ─────────── LEVEL EDITOR ───────────
+const ED_TOOLBAR_H = 40;
+const ED_INSP_W = 130;
+
+function edHit(o, mx, my) {
+  return mx >= o.x && mx <= o.x + o.w && my >= o.y && my <= o.y + o.h;
+}
+
+// Snap helper (8px grid)
+function edSnap(n) { return Math.round(n / 8) * 8; }
+
+// Build a list of "selectable" objects in the current editor level, in
+// drawing-order so foreground objects are picked first.
+function edHitTest(mx, my) {
+  // Try boss
+  if (editorLevel.boss) {
+    const b = editorLevel.boss;
+    if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h)
+      return { type: 'boss' };
+  }
+  // Try goal
+  if (editorLevel.goal) {
+    const g = editorLevel.goal;
+    if (mx >= g.x && mx <= g.x + g.w && my >= g.y && my <= g.y + g.h)
+      return { type: 'goal' };
+  }
+  // Try bots
+  for (let i = editorLevel.bots.length - 1; i >= 0; i--) {
+    const b = editorLevel.bots[i];
+    const w = b.kind === 'floater' ? 32 : 30;
+    const h = b.kind === 'floater' ? 28 : 26;
+    if (mx >= b.x && mx <= b.x + w && my >= b.y && my <= b.y + h)
+      return { type: 'bot', index: i };
+  }
+  // Try spawn marker
+  if (editorLevel.spawn && Math.abs(mx - editorLevel.spawn.x) < 14 && Math.abs(my - editorLevel.spawn.y) < 18)
+    return { type: 'spawn' };
+  // Try baba
+  if (editorLevel.babaRule) {
+    const r = editorLevel.babaRule;
+    if (mx >= r.x && mx <= r.x + 168 && my >= r.y && my <= r.y + 50)
+      return { type: 'baba' };
+  }
+  // Try platforms (last so foreground objects on top of them still pick)
+  for (let i = editorLevel.platforms.length - 1; i >= 0; i--) {
+    const p = editorLevel.platforms[i];
+    if (mx >= p.x && mx <= p.x + p.w && my >= p.y && my <= p.y + p.h)
+      return { type: 'platform', index: i };
+  }
+  return null;
+}
+
+function edGetSelected() {
+  if (!editorSelection) return null;
+  const s = editorSelection;
+  if (s.type === 'platform') return editorLevel.platforms[s.index];
+  if (s.type === 'bot')      return editorLevel.bots[s.index];
+  if (s.type === 'goal')     return editorLevel.goal;
+  if (s.type === 'spawn')    return editorLevel.spawn;
+  if (s.type === 'baba')     return editorLevel.babaRule;
+  if (s.type === 'boss')     return editorLevel.boss;
+  return null;
+}
+
+function edClampX(v) { return Math.max(0, Math.min(W, v)); }
+function edClampY(v) { return Math.max(0, Math.min(H, v)); }
+
+// Mouse handlers driven by canvas listeners (we share with menu clickables)
+let editorMouseDownAt = null;
+let editorDragStart = null;
+
+function editorMouseDown(mx, my) {
+  // Toolbar clicks
+  if (my < ED_TOOLBAR_H) {
+    editorToolbarClick(mx, my);
+    return;
+  }
+  // Inspector clicks (if a selection is showing)
+  if (editorSelection && mx > W - ED_INSP_W) {
+    editorInspectorClick(mx, my);
+    return;
+  }
+
+  // Patrol-pick mode: capture two more clicks for pMin/pMax
+  if (editorPatrolBot) {
+    if (editorPatrolStep === 0) {
+      editorPatrolBot.pMin = edSnap(edClampX(mx));
+      editorPatrolStep = 1;
+    } else {
+      editorPatrolBot.pMax = edSnap(edClampX(mx));
+      // Auto-swap if reversed
+      if (editorPatrolBot.pMax < editorPatrolBot.pMin) {
+        const t = editorPatrolBot.pMin; editorPatrolBot.pMin = editorPatrolBot.pMax; editorPatrolBot.pMax = t;
+      }
+      editorPatrolBot = null;
+      editorPatrolStep = 0;
+      editorDirty = true;
+      saveEditorDraft();
+    }
+    return;
+  }
+
+  const t = editorTool;
+  const x = edSnap(edClampX(mx));
+  const y = edSnap(edClampY(my));
+
+  if (t === 'select') {
+    const hit = edHitTest(mx, my);
+    editorSelection = hit;
+    if (hit) {
+      const obj = edGetSelected();
+      editorDrag = {
+        type: hit.type,
+        index: hit.index,
+        mode: 'move',
+        ox: mx - obj.x, oy: my - obj.y,
+        orig: { ...obj },
+      };
+    }
+    return;
+  }
+
+  if (t === 'platform') {
+    editorDragStart = { x, y };
+    editorDrag = { type: 'newPlatform', ox: x, oy: y };
+    return;
+  }
+  if (t === 'sprout' || t === 'floater' || t === 'charger') {
+    const newBot = { kind: t, x, y, pMin: x - 40, pMax: x + 40, speed: t === 'floater' ? 1.4 : 1.3 };
+    editorLevel.bots.push(newBot);
+    editorPatrolBot = newBot;
+    editorPatrolStep = 0;
+    editorSelection = { type: 'bot', index: editorLevel.bots.length - 1 };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'sentry') {
+    editorLevel.bots.push({ kind: 'sentry', x, y, interval: 90 });
+    editorSelection = { type: 'bot', index: editorLevel.bots.length - 1 };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'spawn') {
+    editorLevel.spawn = { x, y };
+    editorSelection = { type: 'spawn' };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'goal') {
+    editorLevel.goal = { x, y, w: 24, h: 60 };
+    editorSelection = { type: 'goal' };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'baba') {
+    editorLevel.babaRule = { x, y };
+    editorSelection = { type: 'baba' };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'boss') {
+    editorLevel.boss = { x: x - 40, y: y - 90, w: 80, h: 90, hp: 4 };
+    editorSelection = { type: 'boss' };
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+  if (t === 'delete') {
+    const hit = edHitTest(mx, my);
+    if (!hit) return;
+    if (hit.type === 'platform')      editorLevel.platforms.splice(hit.index, 1);
+    else if (hit.type === 'bot')      editorLevel.bots.splice(hit.index, 1);
+    else if (hit.type === 'goal')     editorLevel.goal = null;
+    else if (hit.type === 'baba')     editorLevel.babaRule = null;
+    else if (hit.type === 'boss')     editorLevel.boss = null;
+    // spawn is a singleton — refuse to delete
+    editorSelection = null;
+    editorDirty = true;
+    saveEditorDraft();
+    return;
+  }
+}
+
+function editorMouseMove(mx, my) {
+  if (!editorDrag) return;
+  if (editorDrag.type === 'newPlatform') {
+    // live size handled by drawEditorPlacement
+    return;
+  }
+  if (editorDrag.mode === 'move') {
+    const obj = edGetSelected();
+    if (!obj) return;
+    const nx = edSnap(edClampX(mx - editorDrag.ox));
+    const ny = edSnap(edClampY(my - editorDrag.oy));
+    if (editorDrag.type === 'spawn' || editorDrag.type === 'baba') {
+      obj.x = nx; obj.y = ny;
+    } else {
+      obj.x = nx; obj.y = ny;
+    }
+    editorDirty = true;
+  }
+}
+
+function editorMouseUp(mx, my) {
+  if (!editorDrag) return;
+  if (editorDrag.type === 'newPlatform') {
+    const x0 = editorDrag.ox, y0 = editorDrag.oy;
+    const x1 = edSnap(edClampX(mx)), y1 = edSnap(edClampY(my));
+    const x = Math.min(x0, x1), y = Math.min(y0, y1);
+    const w = Math.max(8,  Math.abs(x1 - x0));
+    const h = Math.max(8,  Math.abs(y1 - y0));
+    editorLevel.platforms.push({ x, y, w, h });
+    editorSelection = { type: 'platform', index: editorLevel.platforms.length - 1 };
+    editorDirty = true;
+    saveEditorDraft();
+  } else {
+    saveEditorDraft();
+  }
+  editorDrag = null;
+}
+
+function editorToolbarClick(mx, my) {
+  // Tool buttons first
+  const btnW = 30, btnH = 28, btnY = 6, gap = 2;
+  let bx = 6;
+  for (const t of ED_TOOLS) {
+    if (mx >= bx && mx <= bx + btnW && my >= btnY && my <= btnY + btnH) {
+      editorTool = t.id;
+      editorSelection = null;
+      editorPatrolBot = null;
+      return;
+    }
+    bx += btnW + gap;
+  }
+  bx += 8;
+  // THEME button (cycles)
+  if (mx >= bx && mx <= bx + 70 && my >= btnY && my <= btnY + btnH) {
+    editorCycleTheme();
+    return;
+  }
+  bx += 70 + 6;
+  // PLAY
+  if (mx >= bx && mx <= bx + 60 && my >= btnY && my <= btnY + btnH) {
+    editorTestPlay();
+    return;
+  }
+  bx += 60 + 6;
+  // SHARE
+  if (mx >= bx && mx <= bx + 60 && my >= btnY && my <= btnY + btnH) {
+    editorShare();
+    return;
+  }
+  bx += 60 + 6;
+  // IMPORT
+  if (mx >= bx && mx <= bx + 60 && my >= btnY && my <= btnY + btnH) {
+    editorImport();
+    return;
+  }
+  bx += 60 + 6;
+  // EXIT
+  if (mx >= bx && mx <= bx + 50 && my >= btnY && my <= btnY + btnH) {
+    saveEditorDraft();
+    gameState = 'menu';
+    menuCursor = 0;
+    return;
+  }
+}
+
+function editorCycleTheme() {
+  const themes = Object.keys(THEME_SKY);
+  const i = themes.indexOf(editorLevel.theme);
+  editorLevel.theme = themes[(i + 1) % themes.length];
+  currentTheme = editorLevel.theme;
+  editorDirty = true;
+  saveEditorDraft();
+}
+
+function editorTestPlay() {
+  if (!editorLevel.spawn || !editorLevel.goal && !editorLevel.boss) {
+    editorToast('need a SPAWN and a GOAL or BOSS');
+    return;
+  }
+  saveEditorDraft();
+  loadCustomLevel(editorLevel, { fromEditor: true });
+  gameState = 'playing';
+}
+
+function editorShare() {
+  const enc = encodeShareString(editorLevel);
+  const url = `${location.origin}${location.pathname}#lvl=${enc}`;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(
+      () => editorToast('link copied! paste to share'),
+      () => editorToast('copy failed — see console'),
+    );
+    console.log('share URL:', url);
+  } else {
+    editorToast('clipboard unavailable — URL in console');
+    console.log('share URL:', url);
+  }
+}
+
+function editorImport() {
+  const input = window.prompt('paste a share link or code:');
+  if (!input) return;
+  let code = input.trim();
+  const idx = code.indexOf('#lvl=');
+  if (idx >= 0) code = code.slice(idx + 5);
+  const ed = decodeShareString(code);
+  if (!ed) { editorToast('invalid link'); return; }
+  editorLevel = ed;
+  editorSelection = null;
+  editorPatrolBot = null;
+  currentTheme = editorLevel.theme;
+  editorDirty = true;
+  saveEditorDraft();
+  editorToast('imported');
+}
+
+function editorInspectorClick(mx, my) {
+  const sel = edGetSelected();
+  if (!sel) return;
+  // Each row in the inspector is 24px tall; 5 rows of +/- pairs
+  // Layout: label at top, then +/- on the right of each row
+  const ix = W - ED_INSP_W + 10;
+  const startY = ED_TOOLBAR_H + 36;
+  const rowH = 22;
+
+  const fields = editorInspectorFields();
+  for (let i = 0; i < fields.length; i++) {
+    const fy = startY + i * rowH;
+    if (my < fy || my > fy + rowH - 2) continue;
+    const minusX = W - 70, plusX = W - 32, btnSize = 22;
+    if (mx >= minusX && mx <= minusX + btnSize && my >= fy && my <= fy + btnSize) {
+      fields[i].set(fields[i].get() - fields[i].step);
+      editorDirty = true; saveEditorDraft();
+      return;
+    }
+    if (mx >= plusX && mx <= plusX + btnSize && my >= fy && my <= fy + btnSize) {
+      fields[i].set(fields[i].get() + fields[i].step);
+      editorDirty = true; saveEditorDraft();
+      return;
+    }
+  }
+}
+
+// Per-selection editable fields. Returns array of {label, get, set, step}.
+function editorInspectorFields() {
+  const sel = edGetSelected();
+  if (!sel) return [];
+  const out = [];
+  if (editorSelection.type === 'platform') {
+    out.push({ label: 'X', get: () => sel.x, set: (v) => sel.x = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'Y', get: () => sel.y, set: (v) => sel.y = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'W', get: () => sel.w, set: (v) => sel.w = Math.max(8, edSnap(v)), step: 8 });
+    out.push({ label: 'H', get: () => sel.h, set: (v) => sel.h = Math.max(8, edSnap(v)), step: 8 });
+  } else if (editorSelection.type === 'bot') {
+    out.push({ label: 'X', get: () => sel.x, set: (v) => sel.x = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'Y', get: () => sel.y, set: (v) => sel.y = Math.max(0, edSnap(v)), step: 8 });
+    if (sel.kind === 'sentry') {
+      out.push({ label: 'INTERVAL', get: () => sel.interval, set: (v) => sel.interval = Math.max(20, Math.round(v)), step: 10 });
+    } else {
+      out.push({ label: 'PMIN', get: () => sel.pMin, set: (v) => sel.pMin = Math.max(0, edSnap(v)), step: 8 });
+      out.push({ label: 'PMAX', get: () => sel.pMax, set: (v) => sel.pMax = Math.max(sel.pMin + 8, edSnap(v)), step: 8 });
+      out.push({ label: 'SPEED×10', get: () => Math.round(sel.speed * 10), set: (v) => sel.speed = Math.max(0.2, v / 10), step: 1 });
+    }
+  } else if (editorSelection.type === 'goal') {
+    out.push({ label: 'X', get: () => sel.x, set: (v) => sel.x = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'Y', get: () => sel.y, set: (v) => sel.y = Math.max(0, edSnap(v)), step: 8 });
+  } else if (editorSelection.type === 'boss') {
+    out.push({ label: 'X', get: () => sel.x, set: (v) => sel.x = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'Y', get: () => sel.y, set: (v) => sel.y = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'HP', get: () => sel.hp, set: (v) => sel.hp = Math.max(1, Math.round(v)), step: 1 });
+  } else if (editorSelection.type === 'spawn' || editorSelection.type === 'baba') {
+    out.push({ label: 'X', get: () => sel.x, set: (v) => sel.x = Math.max(0, edSnap(v)), step: 8 });
+    out.push({ label: 'Y', get: () => sel.y, set: (v) => sel.y = Math.max(0, edSnap(v)), step: 8 });
+  }
+  return out;
+}
+
+function drawEditor() {
+  // Live preview using the existing render pipeline against editorLevel
+  const savedTheme = currentTheme;
+  currentTheme = editorLevel.theme;
+
+  drawSky();
+  // Draw editor's babaRule like normal so it's visible/editable
+  const savedBaba = babaRule; babaRule = editorLevel.babaRule;
+  drawBabaRule();
+  babaRule = savedBaba;
+  for (const p of editorLevel.platforms) drawPlatform(p);
+  // Goal
+  if (editorLevel.goal) {
+    const sg = goal; goal = editorLevel.goal; drawGoal(); goal = sg;
+  }
+  // Boss (just the body, no AI state)
+  if (editorLevel.boss) {
+    const sb = boss;
+    boss = { ...editorLevel.boss, maxHp: editorLevel.boss.hp, state: 'vulnerable', stateTimer: 1000, projTimer: 1000, isFinal: false };
+    drawBoss();
+    boss = sb;
+  }
+  // Bots
+  for (const b of editorLevel.bots) {
+    const runtime = inflateBot(b);
+    if (!runtime) continue;
+    runtime.stunTimer = 0;
+    const savedBots = bots; bots = [runtime];
+    drawBot(runtime);
+    bots = savedBots;
+  }
+  // Spawn marker
+  if (editorLevel.spawn) {
+    const sx = editorLevel.spawn.x, sy = editorLevel.spawn.y;
+    ctx.fillStyle = 'rgba(120, 255, 180, 0.6)';
+    ctx.fillRect(sx - 14, sy - 18, 28, 40);
+    ctx.fillStyle = '#fff';
+    ctx.font = '700 9px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('SPAWN', sx, sy - 4);
+    ctx.textAlign = 'left';
+  }
+
+  // Grid overlay (only if zoomed or just visible faintly)
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  for (let gx = 0; gx < W; gx += 32) ctx.fillRect(gx, ED_TOOLBAR_H, 1, H - ED_TOOLBAR_H);
+  for (let gy = ED_TOOLBAR_H; gy < H; gy += 32) ctx.fillRect(0, gy, W, 1);
+
+  // Selection halo
+  if (editorSelection) {
+    drawEditorSelection();
+  }
+
+  // Patrol-pick ghost
+  if (editorPatrolBot) {
+    const b = editorPatrolBot;
+    const midY = b.y + (b.kind === 'floater' ? 14 : 13);
+    ctx.fillStyle = '#66ff88';
+    if (editorPatrolStep === 0) {
+      ctx.fillRect(mouseX - 1, midY - 6, 2, 12);
+      ctx.font = '700 11px -apple-system, sans-serif';
+      ctx.fillText('click for PMIN', mouseX + 8, midY - 2);
+    } else {
+      // pMin already set; show range so far
+      ctx.fillRect(b.pMin, midY - 1, Math.max(2, mouseX - b.pMin), 2);
+      ctx.fillRect(b.pMin - 1, midY - 6, 2, 12);
+      ctx.fillRect(mouseX - 1, midY - 6, 2, 12);
+      ctx.font = '700 11px -apple-system, sans-serif';
+      ctx.fillText('click for PMAX', mouseX + 8, midY - 2);
+    }
+  }
+
+  // Placement ghost — new platform drag
+  if (editorDrag && editorDrag.type === 'newPlatform') {
+    const x0 = editorDrag.ox, y0 = editorDrag.oy;
+    const x1 = edSnap(edClampX(mouseX)), y1 = edSnap(edClampY(mouseY));
+    const gx = Math.min(x0, x1), gy = Math.min(y0, y1);
+    const gw = Math.max(8, Math.abs(x1 - x0)), gh = Math.max(8, Math.abs(y1 - y0));
+    ctx.fillStyle = 'rgba(120, 255, 180, 0.4)';
+    ctx.fillRect(gx, gy, gw, gh);
+    ctx.fillStyle = '#66ff88';
+    ctx.font = '700 11px -apple-system, sans-serif';
+    ctx.fillText(`${gw} × ${gh}`, gx, gy - 4);
+  }
+
+  currentTheme = savedTheme;
+
+  drawEditorToolbar();
+  if (editorSelection) drawEditorInspector();
+  drawEditorToast();
+}
+
+function drawEditorSelection() {
+  const obj = edGetSelected();
+  if (!obj) return;
+  let x = obj.x, y = obj.y, w = 0, h = 0;
+  if (editorSelection.type === 'platform' || editorSelection.type === 'goal' || editorSelection.type === 'boss') {
+    w = obj.w; h = obj.h;
+  } else if (editorSelection.type === 'bot') {
+    w = obj.kind === 'floater' ? 32 : 30;
+    h = obj.kind === 'floater' ? 28 : 26;
+  } else if (editorSelection.type === 'spawn') {
+    x = obj.x - 14; y = obj.y - 18; w = 28; h = 40;
+  } else if (editorSelection.type === 'baba') {
+    w = 168; h = 50;
+  }
+  ctx.strokeStyle = '#66ff88';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x - 2, y - 2, w + 4, h + 4);
+  // Patrol-range overlay for bots
+  if (editorSelection.type === 'bot' && obj.kind !== 'sentry') {
+    const midY = obj.y + h / 2;
+    ctx.fillStyle = 'rgba(120, 255, 180, 0.45)';
+    ctx.fillRect(obj.pMin, midY - 1, obj.pMax - obj.pMin, 2);
+    ctx.fillRect(obj.pMin - 1, midY - 5, 2, 10);
+    ctx.fillRect(obj.pMax - 1, midY - 5, 2, 10);
+  }
+}
+
+function drawEditorToolbar() {
+  // Background bar
+  ctx.fillStyle = 'rgba(10, 10, 25, 0.85)';
+  ctx.fillRect(0, 0, W, ED_TOOLBAR_H);
+  ctx.fillStyle = '#444';
+  ctx.fillRect(0, ED_TOOLBAR_H - 1, W, 1);
+
+  // Tool buttons
+  const btnW = 30, btnH = 28, btnY = 6, gap = 2;
+  let bx = 6;
+  for (const t of ED_TOOLS) {
+    const active = editorTool === t.id;
+    ctx.fillStyle = active ? '#ffdd33' : 'rgba(255,255,255,0.10)';
+    ctx.fillRect(bx, btnY, btnW, btnH);
+    ctx.fillStyle = active ? '#000' : '#fff';
+    ctx.font = '700 10px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(t.hotkey, bx + btnW / 2, btnY + 12);
+    ctx.font = '500 7px -apple-system, sans-serif';
+    ctx.fillText(t.label.slice(0, 4), bx + btnW / 2, btnY + 22);
+    bx += btnW + gap;
+  }
+  bx += 8;
+  // Theme
+  const themeName = editorLevel.theme.toUpperCase();
+  ctx.fillStyle = THEME_PLAT[editorLevel.theme].top;
+  ctx.fillRect(bx, btnY, 70, btnH);
+  ctx.fillStyle = '#000';
+  ctx.font = '700 11px -apple-system, sans-serif';
+  ctx.fillText(themeName, bx + 35, btnY + 18);
+  bx += 70 + 6;
+  // PLAY
+  ctx.fillStyle = '#66ff88';
+  ctx.fillRect(bx, btnY, 60, btnH);
+  ctx.fillStyle = '#000';
+  ctx.font = '800 13px -apple-system, sans-serif';
+  ctx.fillText('PLAY', bx + 30, btnY + 19);
+  bx += 60 + 6;
+  // SHARE
+  ctx.fillStyle = '#7ecbff';
+  ctx.fillRect(bx, btnY, 60, btnH);
+  ctx.fillStyle = '#000';
+  ctx.fillText('SHARE', bx + 30, btnY + 19);
+  bx += 60 + 6;
+  // IMPORT
+  ctx.fillStyle = '#ffaa44';
+  ctx.fillRect(bx, btnY, 60, btnH);
+  ctx.fillText('IMPORT', bx + 30, btnY + 19);
+  bx += 60 + 6;
+  // EXIT
+  ctx.fillStyle = 'rgba(255, 100, 100, 0.7)';
+  ctx.fillRect(bx, btnY, 50, btnH);
+  ctx.fillStyle = '#fff';
+  ctx.fillText('EXIT', bx + 25, btnY + 19);
+  ctx.textAlign = 'left';
+}
+
+function drawEditorInspector() {
+  const x = W - ED_INSP_W;
+  ctx.fillStyle = 'rgba(10, 10, 25, 0.85)';
+  ctx.fillRect(x, ED_TOOLBAR_H, ED_INSP_W, H - ED_TOOLBAR_H);
+  ctx.fillStyle = '#444';
+  ctx.fillRect(x, ED_TOOLBAR_H, 1, H - ED_TOOLBAR_H);
+
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '700 12px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  const title = editorSelection.type === 'bot'
+    ? edGetSelected()?.kind?.toUpperCase() || 'BOT'
+    : editorSelection.type.toUpperCase();
+  ctx.fillText(title, x + 10, ED_TOOLBAR_H + 22);
+
+  const fields = editorInspectorFields();
+  const startY = ED_TOOLBAR_H + 36;
+  const rowH = 22;
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    const fy = startY + i * rowH;
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '600 10px -apple-system, sans-serif';
+    ctx.fillText(f.label, x + 10, fy + 14);
+    ctx.fillStyle = '#fff';
+    ctx.font = '700 11px "SF Mono", Menlo, monospace';
+    ctx.fillText(String(f.get()), x + 50, fy + 14);
+    // - +
+    const minusX = W - 70, plusX = W - 32, btnSize = 22;
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.fillRect(minusX, fy, btnSize, btnSize);
+    ctx.fillRect(plusX,  fy, btnSize, btnSize);
+    ctx.fillStyle = '#fff';
+    ctx.font = '800 14px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('−', minusX + btnSize / 2, fy + 16);
+    ctx.fillText('+', plusX + btnSize / 2, fy + 16);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawEditorToast() {
+  if (editorToastMs <= 0) return;
+  editorToastMs--;
+  const alpha = Math.min(1, editorToastMs / 20);
+  const w = ctx.measureText(editorToastText).width + 24;
+  const x = (W - w) / 2;
+  const y = H - 40;
+  ctx.fillStyle = `rgba(0, 0, 0, ${0.8 * alpha})`;
+  ctx.fillRect(x, y, w, 28);
+  ctx.fillStyle = `rgba(255, 221, 51, ${alpha})`;
+  ctx.font = '700 13px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(editorToastText, W / 2, y + 18);
+  ctx.textAlign = 'left';
+}
+
 function drawLevelSelect() {
   // Background — themed to currently selected level
   const lv = LEVELS[selectCursor];
@@ -1318,28 +2221,19 @@ function loadSavedLevel() {
   return 0;
 }
 
-function loadLevel(idx) {
-  const lv = LEVELS[idx];
-  const prevWorld = Math.floor(currentLevel / 3);
-  const newWorld = Math.floor(idx / 3);
-  // Cross-world lives refill is suppressed during a trial so range/full runs
-  // can't pad themselves with free hearts every 3 levels.
-  if (prevWorld !== newWorld && !timeTrial) livesLeft = LIVES_PER_WORLD;
-  currentLevel = idx;
-  levelName = lv.name;
-  // Don't pollute the casual resume value while a trial is running
-  if (!timeTrial) saveProgress();
+// Shared init path used by both built-in level loads (loadLevel) and custom
+// level loads (loadCustomLevel). Takes a runtime-form level object.
+function initFromLevelObject(lv) {
   spawn = { x: lv.spawn.x, y: lv.spawn.y };
-  // Deep-copy platforms and bots so we don't mutate the level definition
   platforms = lv.platforms.map((p) => ({ ...p }));
   bots = lv.bots.map((b) => ({ ...b, stunTimer: 0 }));
   goal = lv.goal ? { ...lv.goal } : null;
-  // Every level shows FLAG IS WIN by default; levels can override the position.
   babaRule = lv.babaRule ? { ...lv.babaRule } : { x: 310, y: 70 };
   currentTheme = lv.theme || 'field';
   projectiles = [];
   boss = lv.boss ? {
     ...lv.boss,
+    isFinal: !!lv.boss.isFinal,
     maxHp: lv.boss.hp,
     state: 'vulnerable',
     stateTimer: BOSS_VULN_FRAMES,
@@ -1348,6 +2242,36 @@ function loadLevel(idx) {
   levelComplete = false;
   levelCompleteTimer = 0;
   respawn();
+}
+
+function loadLevel(idx) {
+  const lv = LEVELS[idx];
+  const prevWorld = Math.floor(currentLevel / 3);
+  const newWorld = Math.floor(idx / 3);
+  // Cross-world lives refill is suppressed during a trial so range/full runs
+  // can't pad themselves with free hearts every 3 levels.
+  if (prevWorld !== newWorld && !timeTrial) livesLeft = LIVES_PER_WORLD;
+  customLevelActive = null;
+  currentLevel = idx;
+  levelName = lv.name;
+  if (!timeTrial) saveProgress();
+  initFromLevelObject(lv);
+}
+
+// Load an editor-form custom level. fromEditor=true means we'll route back to
+// the editor on exit (death after lives, goal touch, Esc-quit).
+function loadCustomLevel(editorForm, opts = {}) {
+  const runtime = levelToRuntime(editorForm);
+  // Force-strip isFinal on custom levels so they can't trigger the canonical
+  // end-of-game flow.
+  if (runtime.boss) runtime.boss.isFinal = false;
+  customLevelActive = { editor: editorForm, runtime, fromEditor: !!opts.fromEditor };
+  returnToEditorOnExit = !!opts.fromEditor;
+  // currentLevel sentinel — null prevents arithmetic like LEVELS[currentLevel+1]
+  currentLevel = null;
+  levelName = editorForm.name || 'Custom';
+  livesLeft = LIVES_PER_WORLD;
+  initFromLevelObject(runtime);
 }
 
 function pressing(...names) {
@@ -1501,6 +2425,15 @@ function update() {
       if (timeTrial) {
         onLevelCleared();
         return; // trial took over — don't fall through to setting levelComplete
+      }
+      if (customLevelActive) {
+        // Test-play / custom-level success — bounce back to editor (or menu)
+        const ret = returnToEditorOnExit;
+        customLevelActive = null;
+        returnToEditorOnExit = false;
+        if (ret) { editorToast('LEVEL CLEAR ✓'); gameState = 'editor'; }
+        else     { gameState = 'menu'; menuCursor = 0; }
+        return;
       }
     }
     levelComplete = true;
@@ -1662,6 +2595,22 @@ function die() {
       return;
     }
     loadLevel(currentLevel);
+    return;
+  }
+  if (customLevelActive) {
+    // Custom levels don't restart from a "world first" — they're one-offs.
+    // Lives still tick; running out boots you back to the editor (or menu).
+    livesLeft--;
+    if (livesLeft <= 0) {
+      livesLeft = LIVES_PER_WORLD;
+      const ret = returnToEditorOnExit;
+      customLevelActive = null;
+      returnToEditorOnExit = false;
+      gameState = ret ? 'editor' : 'menu';
+      if (!ret) menuCursor = 0;
+      return;
+    }
+    loadCustomLevel(customLevelActive.editor, { fromEditor: returnToEditorOnExit });
     return;
   }
   livesLeft--;
@@ -1941,6 +2890,14 @@ function handleBossCollision() {
       if (timeTrial) {
         onLevelCleared();
         return; // trial took over — don't set levelComplete (current level may have changed)
+      }
+      if (customLevelActive) {
+        const ret = returnToEditorOnExit;
+        customLevelActive = null;
+        returnToEditorOnExit = false;
+        if (ret) { editorToast('LEVEL CLEAR ✓'); gameState = 'editor'; }
+        else     { gameState = 'menu'; menuCursor = 0; }
+        return;
       }
       levelComplete = true;
       levelCompleteTimer = 0;
@@ -2940,13 +3897,100 @@ function loop() {
     drawTrialLevelSelect();
   } else if (gameState === 'trialResults') {
     drawTrialResults();
+  } else if (gameState === 'editor') {
+    drawEditor();
+  } else if (gameState === 'sharedConfirm') {
+    drawSharedConfirm();
   }
   requestAnimationFrame(loop);
 }
 
+function sharedConfirmAction(idx) {
+  if (!sharedLevelPending) { gameState = 'menu'; menuCursor = 0; return; }
+  const ed = sharedLevelPending;
+  sharedLevelPending = null;
+  if (idx === 0) {
+    // PLAY
+    loadCustomLevel(ed, { fromEditor: false });
+    gameState = 'playing';
+  } else if (idx === 1) {
+    // EDIT
+    editorLevel = ed;
+    editorSelection = null;
+    editorPatrolBot = null;
+    currentTheme = ed.theme;
+    saveEditorDraft();
+    gameState = 'editor';
+  } else {
+    // CANCEL
+    gameState = 'menu';
+    menuCursor = 0;
+  }
+}
+
+function drawSharedConfirm() {
+  // Themed background by the shared level's theme
+  const savedTheme = currentTheme;
+  currentTheme = sharedLevelPending ? sharedLevelPending.theme : 'cosmic';
+  drawSky();
+  currentTheme = savedTheme;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, 0, W, H);
+  clickables = [];
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdd33';
+  ctx.font = '800 30px -apple-system, sans-serif';
+  ctx.fillText('SHARED LEVEL', W / 2, 90);
+  ctx.fillStyle = '#fff';
+  ctx.font = '600 18px -apple-system, sans-serif';
+  ctx.fillText(sharedLevelPending ? `"${sharedLevelPending.name}"` : '', W / 2, 124);
+
+  const labels = ['PLAY', 'OPEN IN EDITOR', 'CANCEL'];
+  const btnW = 240, btnH = 44, gap = 12;
+  const startY = 180;
+  for (let i = 0; i < labels.length; i++) {
+    const x = (W - btnW) / 2;
+    const y = startY + i * (btnH + gap);
+    const hovered = mouseX >= x && mouseX <= x + btnW && mouseY >= y && mouseY <= y + btnH;
+    if (hovered) sharedConfirmCursor = i;
+    const selected = i === sharedConfirmCursor;
+    ctx.fillStyle = selected ? 'rgba(255, 221, 51, 0.25)' : 'rgba(255, 255, 255, 0.08)';
+    ctx.fillRect(x, y, btnW, btnH);
+    ctx.fillStyle = selected ? '#ffdd33' : 'rgba(255,255,255,0.4)';
+    ctx.fillRect(x, y, btnW, 2);
+    ctx.fillRect(x, y + btnH - 2, btnW, 2);
+    ctx.fillRect(x, y, 2, btnH);
+    ctx.fillRect(x + btnW - 2, y, 2, btnH);
+    ctx.fillStyle = selected ? '#ffdd33' : '#fff';
+    ctx.font = '700 17px -apple-system, sans-serif';
+    ctx.fillText(labels[i], W / 2, y + btnH / 2 + 6);
+    clickables.push({ x, y, w: btnW, h: btnH, action: () => sharedConfirmAction(i) });
+  }
+  ctx.textAlign = 'left';
+}
+
+// ───── URL hash parser at boot — consume #lvl= if present ─────
+function consumeShareHashAtBoot() {
+  const h = location.hash || '';
+  if (!h.startsWith('#lvl=')) return false;
+  const code = h.slice(5);
+  const ed = decodeShareString(code);
+  // Strip the hash so reloads don't keep re-prompting
+  history.replaceState(null, '', location.pathname + location.search);
+  if (!ed) return false;
+  sharedLevelPending = ed;
+  return true;
+}
+
 // Pre-load the saved level so PLAY from menu is instant, but stay on menu first.
 loadLevel(loadSavedLevel());
-gameState = 'menu';
+if (consumeShareHashAtBoot()) {
+  gameState = 'sharedConfirm';
+  sharedConfirmCursor = 0;
+} else {
+  gameState = 'menu';
+}
 loop();
 </script>
 </body>
