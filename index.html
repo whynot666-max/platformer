@@ -1647,6 +1647,7 @@ function editorMouseDown(mx, my) {
   }
   if (t === 'goal') {
     editorLevel.goal = { x, y, w: 24, h: 60 };
+    editorLevel.boss = null; // boss + flag are mutually exclusive completion conditions
     editorSelection = { type: 'goal' };
     editorDirty = true;
     saveEditorDraft();
@@ -1661,6 +1662,7 @@ function editorMouseDown(mx, my) {
   }
   if (t === 'boss') {
     editorLevel.boss = { x: x - 40, y: y - 90, w: 80, h: 90, hp: 4 };
+    editorLevel.goal = null; // boss + flag are mutually exclusive
     editorSelection = { type: 'boss' };
     editorDirty = true;
     saveEditorDraft();
@@ -1880,27 +1882,30 @@ function editorInspectorFields() {
 }
 
 function drawEditor() {
-  // Live preview using the existing render pipeline against editorLevel
+  // Live preview using the existing render pipeline against editorLevel.
+  // Swap all related globals upfront so drawBabaRule (which needs boss+goal
+  // context to decide flag-rule vs boss-rule) sees the editor's level state.
   const savedTheme = currentTheme;
+  const savedBaba  = babaRule;
+  const savedGoal  = goal;
+  const savedBoss  = boss;
   currentTheme = editorLevel.theme;
+  babaRule = editorLevel.babaRule || { x: 274, y: 70 };
+  goal = editorLevel.goal;
+  boss = editorLevel.boss ? {
+    ...editorLevel.boss,
+    maxHp: editorLevel.boss.hp,
+    state: 'vulnerable',
+    stateTimer: 1000,
+    projTimer: 1000,
+    isFinal: false,
+  } : null;
 
   drawSky();
-  // Draw editor's babaRule like normal so it's visible/editable
-  const savedBaba = babaRule; babaRule = editorLevel.babaRule;
   drawBabaRule();
-  babaRule = savedBaba;
   for (const p of editorLevel.platforms) drawPlatform(p);
-  // Goal
-  if (editorLevel.goal) {
-    const sg = goal; goal = editorLevel.goal; drawGoal(); goal = sg;
-  }
-  // Boss (just the body, no AI state)
-  if (editorLevel.boss) {
-    const sb = boss;
-    boss = { ...editorLevel.boss, maxHp: editorLevel.boss.hp, state: 'vulnerable', stateTimer: 1000, projTimer: 1000, isFinal: false };
-    drawBoss();
-    boss = sb;
-  }
+  if (goal) drawGoal();
+  if (boss) drawBoss();
   // Bots
   for (const b of editorLevel.bots) {
     const runtime = inflateBot(b);
@@ -3593,9 +3598,49 @@ const isImg = new Image();
 isImg.src = 'assets/is.png';
 const winImg = new Image();
 winImg.src = 'assets/win.png';
+const levelImg = new Image();
+levelImg.src = 'assets/level.png';
+const withoutImg = new Image();
+withoutImg.src = 'assets/without.png';
+
+// BOSS tile — generated procedurally to match the other tiles' chunky look.
+// Dark navy bg, yellow "BO / SS" stacked 2x2 like the FLAG / LEVEL tiles.
+const bossTile = (() => {
+  const c = document.createElement('canvas');
+  c.width = 24; c.height = 24;
+  const cx = c.getContext('2d');
+  cx.fillStyle = '#0d0f1c';
+  cx.fillRect(0, 0, 24, 24);
+  const GLYPHS = {
+    B: ['XXXX.','X...X','XXXX.','X...X','XXXX.'],
+    O: ['.XXX.','X...X','X...X','X...X','.XXX.'],
+    S: ['.XXXX','X....','.XXX.','....X','XXXX.'],
+  };
+  cx.fillStyle = '#ffdd33';
+  const drawG = (letter, ox, oy, s) => {
+    const pat = GLYPHS[letter];
+    for (let r = 0; r < pat.length; r++) {
+      for (let col = 0; col < pat[r].length; col++) {
+        if (pat[r][col] === 'X') cx.fillRect(ox + col * s, oy + r * s, s, s);
+      }
+    }
+  };
+  drawG('B', 2,  2,  2);
+  drawG('O', 12, 2,  2);
+  drawG('S', 2,  12, 2);
+  drawG('S', 12, 12, 2);
+  return c;
+})();
 
 function drawBabaRule() {
   if (!babaRule) return;
+  // Boss levels (boss exists but no goal flag): show LEVEL IS BOSS IS WIN.
+  // Everything else: standard FLAG IS WIN.
+  const isBossRule = boss && !goal;
+  const tiles = isBossRule
+    ? [levelImg, withoutImg, bossTile, isImg, winImg]
+    : [flagImg, isImg, winImg];
+
   const bob = Math.sin(performance.now() / 450) * 2.5;
   const size = 44;
   const gap = 8;
@@ -3604,13 +3649,12 @@ function drawBabaRule() {
 
   const prevSmooth = ctx.imageSmoothingEnabled;
   ctx.imageSmoothingEnabled = false;
-
-  if (flagImg.complete && flagImg.naturalWidth) ctx.drawImage(flagImg, x, y, size, size);
-  x += size + gap;
-  if (isImg.complete && isImg.naturalWidth)   ctx.drawImage(isImg,   x, y, size, size);
-  x += size + gap;
-  if (winImg.complete && winImg.naturalWidth) ctx.drawImage(winImg,  x, y, size, size);
-
+  for (const t of tiles) {
+    if (t && (t.complete === undefined || t.complete) && (t.naturalWidth === undefined || t.naturalWidth)) {
+      ctx.drawImage(t, x, y, size, size);
+    }
+    x += size + gap;
+  }
   ctx.imageSmoothingEnabled = prevSmooth;
 }
 
