@@ -1374,8 +1374,17 @@ function drawVerticalMenu(title, options, cursor, setCursor, subtitle) {
     ctx.fillText(subtitle, W / 2, 138);
   }
 
-  const btnW = 280, btnH = 44, gap = 12;
-  const startY = 180;
+  // Scale button height + gap down when there are many options so the column
+  // still fits between the subtitle (~150) and the footer hint (~478).
+  const n = options.length;
+  const FOOTER_Y = H - 30;
+  const TOP_Y = subtitle ? 156 : 168;
+  const available = FOOTER_Y - TOP_Y;
+  let btnH = n <= 5 ? 44 : Math.max(28, Math.floor((available - (n - 1) * 8) / n));
+  let gap  = n <= 5 ? 12 : 8;
+  const btnW = 280;
+  const totalH = n * btnH + (n - 1) * gap;
+  const startY = TOP_Y + Math.max(0, (available - totalH) / 2);
   for (let i = 0; i < options.length; i++) {
     const x = (W - btnW) / 2;
     const y = startY + i * (btnH + gap);
